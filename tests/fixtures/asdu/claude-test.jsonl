@@ -1,0 +1,4 @@
+{"type":"queue-operation","operation":"enqueue","sessionId":"claude-test-001","cwd":"/workspace/demo"}
+this is intentionally not JSON
+{"type":"user","sessionId":"claude-test-001","cwd":"/workspace/demo","isSidechain":true,"entrypoint":"claude-vscode","message":{"role":"user","content":"inspect the synthetic Claude fixture"}}
+{"type":"assistant","sessionId":"claude-test-001","cwd":"/workspace/demo","message":{"role":"assistant","content":"fixture inspected"}}

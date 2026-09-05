@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "asdu"
+version = "0.1.0"
+description = "A local terminal browser for coding-agent session storage"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = ["send2trash>=1.8.3"]
+
+[project.scripts]
+asdu = "asdu:main"
+
+[tool.setuptools]
+py-modules = ["asdu"]
