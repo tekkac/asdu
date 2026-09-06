@@ -1,25 +1,29 @@
 """Linux wheel smoke test. Run via tests/Dockerfile; uses disposable data only."""
 
 import gzip
-from importlib.metadata import version
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
 from dataclasses import replace
+from importlib.metadata import version
+from pathlib import Path
 from unittest.mock import patch
 
 import asdu
+import asdu_browser as browser
+import asdu_sessions as transcripts
 
 
 class InstalledSmoke(unittest.TestCase):
     def test_installed_wheel(self):
         source = Path(__file__).resolve().parents[1]
-        installed = Path(asdu.__file__).resolve()
-        self.assertNotEqual(installed, source / "asdu.py")
-        self.assertEqual(installed.read_bytes(), (source / "asdu.py").read_bytes())
+        for module in (asdu, transcripts, browser):
+            installed = Path(module.__file__).resolve()
+            original = source / installed.name
+            self.assertNotEqual(installed, original)
+            self.assertEqual(installed.read_bytes(), original.read_bytes())
         self.assertEqual(
             subprocess.check_output(["asdu", "--version"], text=True).strip(),
             f"asdu {version('asdu')}",
@@ -36,9 +40,13 @@ class InstalledSmoke(unittest.TestCase):
                 shutil.copy(fixtures / "rollout-codex.jsonl", codex)
                 shutil.copy(fixtures / "claude-test.jsonl", claude)
                 progress = asdu.ScanProgress(False)
-                cache = asdu.ContentCache(False)
-                entries = asdu.scan_codex(codex, [], False, progress, cache, None)
-                entries += asdu.scan_claude(claude, [], False, progress, cache, None)
+                cache = transcripts.ContentCache(False)
+                entries = transcripts.scan_codex(
+                    codex, [], False, progress, cache, None
+                )
+                entries += transcripts.scan_claude(
+                    claude, [], False, progress, cache, None
+                )
                 self.assertEqual(
                     {entry.source for entry in entries}, {"codex", "claude"}
                 )
@@ -71,22 +79,22 @@ class InstalledSmoke(unittest.TestCase):
                     parent_id=parent.session_id,
                     path=codex / "rollout-child.jsonl",
                 )
-                tree = asdu.session_tree([child, parent], "size")
+                tree = browser.session_tree([child, parent], "size")
                 self.assertEqual(
                     [entry.session_id for entry, _ in tree],
                     [parent.session_id, "child"],
                 )
                 self.assertEqual(
                     len(
-                        asdu.session_tree(
-                            [child, parent], "size", {asdu.row_id(parent)}
+                        browser.session_tree(
+                            [child, parent], "size", {browser.row_id(parent)}
                         )
                     ),
                     1,
                 )
 
                 original = parent.path.read_bytes()
-                archived = asdu.archive_session(parent)
+                archived = transcripts.archive_session(parent)
                 self.assertFalse(parent.path.exists())
                 self.assertTrue(archived.is_relative_to(data))
                 with gzip.open(archived, "rb") as handle:
@@ -94,7 +102,7 @@ class InstalledSmoke(unittest.TestCase):
 
                 disposable = entries[1].path
                 original = disposable.read_bytes()
-                asdu.move_to_trash(disposable)
+                transcripts.move_to_trash(disposable)
                 self.assertFalse(disposable.exists())
                 trashed = list((data / "Trash" / "files").iterdir())
                 self.assertEqual(len(trashed), 1)

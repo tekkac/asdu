@@ -5,7 +5,7 @@ FROM python:3.11-slim-bookworm
 
 # Copy only source inputs: never reuse a workstation's build/ directory.
 WORKDIR /src
-COPY pyproject.toml MANIFEST.in LICENSE README.md asdu.py asdu.toml.example ./
+COPY pyproject.toml MANIFEST.in LICENSE README.md asdu.py asdu_sessions.py asdu_browser.py asdu.toml.example ./
 COPY tests ./tests
 RUN python -m pip wheel --no-cache-dir --wheel-dir /wheels . \
     && python -m pip install --no-index --find-links=/wheels asdu \
