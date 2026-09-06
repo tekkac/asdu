@@ -1121,6 +1121,79 @@ class AsduTests(unittest.TestCase):
         window = Input([down, up, -1])
         self.assertEqual(asdu.drain_navigation(window, down, 0, [0, 4, 9]), (4, -1))
 
+    def test_keyboard_cancels_wheel_tail_until_quiet_or_reversal(self):
+        for wheel, reverse, start, expected in (
+            (asdu.WHEEL_DOWN, asdu.curses.KEY_UP, 8, 7),
+            (asdu.WHEEL_UP, asdu.curses.KEY_DOWN, 0, 1),
+        ):
+            window = asdu.TerminalWindow(unittest.mock.Mock())
+            # The tail continues for longer than the quiet threshold overall,
+            # but never leaves a quiet gap between individual reports.
+            with (
+                patch.object(
+                    window,
+                    "_getch",
+                    side_effect=[
+                        wheel,
+                        reverse,
+                        wheel,
+                        wheel,
+                        wheel,
+                        -1,
+                        wheel,
+                    ],
+                ),
+                patch.object(
+                    asdu.time,
+                    "monotonic",
+                    side_effect=[
+                        0,
+                        0.05,
+                        0.1,
+                        0.3,
+                        0.5,
+                        0.51,
+                        0.8,
+                    ],
+                ),
+            ):
+                key = window.getch()
+                direction = 1 if key == asdu.curses.KEY_DOWN else -1
+                self.assertEqual(min(8, max(0, start + direction)), start)
+                self.assertEqual(window.getch(), reverse)
+                direction = 1 if reverse == asdu.curses.KEY_DOWN else -1
+                self.assertEqual(start + direction, expected)
+                self.assertEqual(window.getch(), -1)  # Momentum is discarded.
+                self.assertEqual(window.getch(), key)  # A fresh gesture works.
+
+            window = asdu.TerminalWindow(unittest.mock.Mock())
+            opposite = asdu.WHEEL_UP if wheel == asdu.WHEEL_DOWN else asdu.WHEEL_DOWN
+            with (
+                patch.object(window, "_getch", side_effect=[wheel, reverse, opposite]),
+                patch.object(asdu.time, "monotonic", side_effect=[0, 0.05, 0.1]),
+            ):
+                window.getch()
+                self.assertEqual(window.getch(), reverse)
+                self.assertEqual(window.getch(), reverse)  # Wheel reversal is fresh.
+
+    def test_sgr_wheel_decode_does_not_depend_on_button5(self):
+        raw = unittest.mock.Mock()
+        raw.getch.side_effect = iter(b"\x1b[<64;10;9M\x1b[<65;10;9M\x1b[A")
+        window = asdu.TerminalWindow(raw)
+        self.assertEqual(window._getch(), asdu.WHEEL_UP)
+        self.assertEqual(window._getch(), asdu.WHEEL_DOWN)
+        self.assertEqual(window._getch(), asdu.curses.KEY_UP)
+
+    def test_large_navigation_batch_preserves_keyboard_reverse(self):
+        window = unittest.mock.Mock()
+        window.getch.side_effect = iter(
+            [asdu.curses.KEY_DOWN] * 1000 + [asdu.curses.KEY_UP, ord("q")]
+        )
+        self.assertEqual(
+            asdu.drain_navigation(window, asdu.curses.KEY_DOWN, 0, range(9)),
+            (7, ord("q")),
+        )
+
     def test_tree_keeps_cycles_duplicates_and_sources_separate(self) -> None:
         a, b = session("a", "b"), session("b", "a")
         duplicate = replace(a, path=Path("/duplicate"))

@@ -1,6 +1,7 @@
 """Small real-PTY checks; fictional data only, no terminal emulator required."""
 
 import fcntl
+import json
 import os
 import pty
 import select
@@ -95,6 +96,8 @@ class TerminalTests(unittest.TestCase):
         )
         self.read_for(0.05)
         self.assertNotIn(b"Traceback", self.output)
+        self.assertIn(b"\x1b[?1000h\x1b[?1006h", self.output)
+        self.assertIn(b"\x1b[?1000l\x1b[?1006l", self.output)
         self.assertIn(b"\x1b[2J", self.output.split(b"\x1b[?1049l")[-1])
         modes = termios.tcgetattr(self.slave)
         # BSD sets PENDIN when cooked input is restored; it is a transient flag.
@@ -131,5 +134,65 @@ class TerminalTests(unittest.TestCase):
         os.write(self.master, b"ffff/ffff/ffff\x1b\\")
         self.assertEqual(self.read_for(0.1), b"")
         self.assertIsNone(self.process.poll())
+        os.write(self.master, b"q")
+        self.finish(0)
+
+    def test_wheel_momentum_cannot_undo_keyboard_reverse_at_boundaries(self):
+        self.stop()
+        termios.tcsetattr(self.slave, termios.TCSANOW, self.original_modes)
+        read_fd, write_fd = os.pipe()
+        self.addCleanup(os.close, read_fd)
+        self.addCleanup(os.close, write_fd)
+        program = f"""
+import sys, os, json
+from pathlib import Path
+sys.path.insert(0, {str(ROOT)!r})
+import asdu
+entries = [asdu.Session(Path('/fictional'), 1, 0, 'codex', 'primary',
+    '/fictional', str(i), None, str(i), ('untagged',)) for i in range(9)]
+drain = asdu.drain_navigation
+def observed(*args):
+    result = drain(*args)
+    os.write({write_fd}, (json.dumps(result[0]) + '\\n').encode())
+    return result
+asdu.drain_navigation = observed
+asdu.tui(entries, 'cwd', 'name', Path('/fictional'), True, lambda _: entries)
+"""
+        self.process = subprocess.Popen(
+            [sys.executable, "-c", program],
+            stdin=self.slave,
+            stdout=self.slave,
+            stderr=self.slave,
+            pass_fds=(write_fd,),
+            env=dict(os.environ, TERM="xterm-256color"),
+        )
+        self.wait_for(b"help")
+
+        def positions(seconds):
+            self.read_for(seconds)
+            data = b""
+            while select.select([read_fd], [], [], 0)[0]:
+                data += os.read(read_fd, 65536)
+            return [json.loads(line) for line in data.splitlines()]
+
+        for wheel, reverse, opposite, edge, expected in (
+            (b"\x1b[<65;10;10M", b"\x1bOA", b"\x1b[<64;10;10M", 8, 7),
+            (b"\x1b[<64;10;10M", b"\x1bOB", b"\x1b[<65;10;10M", 0, 1),
+        ):
+            positions(0.3)  # Separate the two gestures.
+            os.write(self.master, wheel * 12)
+            self.assertEqual(positions(0.05)[-1], edge)
+            os.write(self.master, reverse)
+            self.assertEqual(positions(0.05)[-1], expected)
+            # Post-key momentum, including reports arriving in later frames.
+            for _ in range(6):
+                os.write(self.master, wheel * 3)
+                self.assertEqual(positions(0.05), [])
+            os.write(self.master, opposite)
+            step = -1 if edge == 8 else 1
+            self.assertEqual(positions(0.05)[-1], expected + step)
+            positions(0.3)
+            os.write(self.master, wheel)
+            self.assertEqual(positions(0.05)[-1], expected)
         os.write(self.master, b"q")
         self.finish(0)

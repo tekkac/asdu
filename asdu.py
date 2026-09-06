@@ -426,6 +426,13 @@ def print_sessions(sessions: list[Session], sort_by: str) -> None:
         )
 
 
+WHEEL_UP = curses.KEY_MAX + 1
+WHEEL_DOWN = curses.KEY_MAX + 2
+# Terminal wheel reports have no gesture-end marker. A quiet gap separates
+# gestures; reversing the wheel also starts a new gesture immediately.
+WHEEL_IDLE_SECONDS = 0.25
+
+
 class TerminalWindow:
     """Keep terminal replies out of commands, including replies arriving late."""
 
@@ -434,6 +441,9 @@ class TerminalWindow:
         self.in_osc = False
         self.osc_escape = False
         self.delay = -1
+        self.last_wheel = None
+        self.wheel_direction = None
+        self.wheel_cancelled = False
 
     def __getattr__(self, name):
         return getattr(self.raw, name)
@@ -447,10 +457,39 @@ class TerminalWindow:
         self.raw.nodelay(enabled)
 
     def getch(self):
+        while True:
+            key = self._getch()
+            now = time.monotonic()
+            active = (
+                self.last_wheel is not None
+                and now - self.last_wheel < WHEEL_IDLE_SECONDS
+            )
+            if key in (WHEEL_UP, WHEEL_DOWN):
+                if not active or key != self.wheel_direction:
+                    self.wheel_cancelled = False
+                self.last_wheel, self.wheel_direction = now, key
+                if self.wheel_cancelled:
+                    continue
+                return curses.KEY_UP if key == WHEEL_UP else curses.KEY_DOWN
+            if key != -1 and active:
+                self.wheel_cancelled = True
+            return key
+
+    def _getch(self):
         for _ in range(256):
             key = self.raw.getch()
             if key == -1:
                 return key
+            if key == curses.KEY_MOUSE:
+                try:
+                    buttons = curses.getmouse()[4]
+                except curses.error:
+                    return -1
+                if buttons & curses.BUTTON4_PRESSED:
+                    return WHEEL_UP
+                if buttons & getattr(curses, "BUTTON5_PRESSED", 0):
+                    return WHEEL_DOWN
+                return -1
             if self.in_osc:
                 if key == 7 or (self.osc_escape and key == ord("\\")):
                     self.in_osc = False
@@ -465,13 +504,19 @@ class TerminalWindow:
                     # A multiplexer can send normal-mode arrows while terminfo
                     # expects application-mode arrows (or the reverse).
                     sequence = ""
-                    for _ in range(16):
+                    for _ in range(32):
                         part = self.raw.getch()
                         if not 0 <= part < 128:
                             return -1
                         sequence += chr(part)
                         if 0x40 <= part <= 0x7E:
                             break
+                    if sequence.startswith("<"):
+                        report = re.fullmatch(r"<(\d+);\d+;\d+M", sequence)
+                        if report:
+                            button = int(report[1]) & ~28  # Shift/Alt/Ctrl bits.
+                            return {64: WHEEL_UP, 65: WHEEL_DOWN}.get(button, -1)
+                        return -1
                     return {
                         "A": curses.KEY_UP,
                         "B": curses.KEY_DOWN,
@@ -811,14 +856,13 @@ def drain_navigation(window, key, selected, positions):
     index = positions.index(selected)
     window.nodelay(True)
     try:
-        # Bound a batch so sustained input still gets regular screen updates.
-        for _ in range(256):
+        # Like ncdu, finish pending navigation before redrawing. Do not replay
+        # wheel-derived arrows through ungetch: that loses their provenance.
+        while True:
             index = min(len(positions) - 1, max(0, index + directions[key]))
             key = window.getch()
             if key not in directions:
                 return positions[index], key
-        curses.ungetch(key)
-        return positions[index], -1
     finally:
         window.nodelay(False)
 
@@ -1019,14 +1063,17 @@ def tui(
     def run(window: curses.window) -> None:
         window = TerminalWindow(window)
         curses.curs_set(0)
-        # ncdu likewise leaves touchpad/mouse handling to the terminal.
-        # Curses' mouse reports differ between terminal emulators and can turn
-        # a two-finger gesture into erratic selection movement.
+        # New curses decodes wheel reports itself; old builds without BUTTON5
+        # need the raw SGR parser. Both preserve wheel/keyboard provenance.
         try:
-            curses.mousemask(0)
+            down_button = getattr(curses, "BUTTON5_PRESSED", 0)
+            curses.mousemask(curses.BUTTON4_PRESSED | down_button if down_button else 0)
             curses.mouseinterval(0)
         except curses.error:
             pass
+        if sys.stdout.isatty():
+            sys.stdout.write("\x1b[?1000h\x1b[?1006h")
+            sys.stdout.flush()
         window.colors_enabled = (
             not (no_color or os.environ.get("NO_COLOR")) and curses.has_colors()
         )
@@ -1686,7 +1733,12 @@ def tui(
                 entry = display_entries[browser.selected][0]
                 open_brief(window, entry, tree_entries if tree_mode else visible)
 
-    curses.wrapper(run)
+    try:
+        curses.wrapper(run)
+    finally:
+        if sys.stdout.isatty():
+            sys.stdout.write("\x1b[?1000l\x1b[?1006l")
+            sys.stdout.flush()
     clear_terminal()
 
 
@@ -1714,7 +1766,7 @@ def run_main() -> int:
     parser = argparse.ArgumentParser(
         description="ncdu-style browser for local agent session storage."
     )
-    parser.add_argument("--version", action="version", version="asdu 0.1.2")
+    parser.add_argument("--version", action="version", version="asdu 0.1.3")
     parser.add_argument(
         "command",
         nargs="?",
