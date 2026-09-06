@@ -1,2 +1,2 @@
-include asdu.toml.example TODO.md
+include asdu.toml.example
 recursive-include tests *.py *.jsonl

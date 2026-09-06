@@ -9,11 +9,5 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - run: python3 -m py_compile asdu.py tests/test_asdu.py
-      - run: python3 -m unittest tests/test_asdu.py
-      - run: python3 -m pip install .
-      - run: asdu --version
-      - run: asdu summary --source codex --root tests/fixtures/asdu --all
+      - run: docker build -f tests/Dockerfile -t asdu-smoke .
+      - run: docker run --rm --network none asdu-smoke

@@ -1,138 +1,139 @@
 # asdu
 
-`asdu` is an ncdu-style browser for local coding-agent session storage.
-It answers a practical question: which projects, topics, and conversations are
-using disk before you archive or remove them.
+`asdu` is a terminal browser for Codex and Claude sessions, inspired by ncdu.
+Find large conversations, see what they were about, and archive or trash them.
+Everything runs locally.
 
-It reads Codex and Claude sessions locally. It makes no network or model calls.
-Other local agent formats are welcome as small, self-contained source adapters.
+## A look inside
 
-## Quick start
+Preview with fictional sessions:
 
-Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
+```text
+ asdu  demo                                                  size↓
 
-For testing from the private repository, first authenticate GitHub over SSH:
+›    1.0 GiB  ████████████     42  /make-the-tests-green
+   512.0 MiB  ██████░░░░░░     17  /one-small-css-change
+   256.0 MiB  ███░░░░░░░░░      8  /rewrite-it-in-rust
+   128.0 MiB  █▌░░░░░░░░░░      5  /why-is-it-dns
+    64.0 MiB  ▊░░░░░░░░░░░      3  /final-final-v2
+
+Transcripts: 1.9 GiB  75 sessions
+ Enter open  g group  f filter  s sort  ? help
+```
+
+Open a conversation with `Enter`:
+
+```text
+ Center a div without changing the laws of physics
+
+File: 18.2 MiB
+
+12 turns across 384 events; 2 compactions.
+ID: demo-css-001
+
+╭ First request
+│ Move the button two pixels to the left.
+
+├ Latest request
+│ Why did the login page disappear?
+
+├ Last reply
+│ The button is centered. I have restored the login page
+│ and removed the unnecessary Kubernetes deployment.
+╰
+
+Folder: /demo/one-small-css-change
+Tags: development
+Resume: claude --resume demo-css-001
+```
+
+## Install
+
+Requires [uv](https://docs.astral.sh/uv/), Python 3.11+, and a POSIX terminal
+(Linux or macOS). From a clean checkout of this repository:
 
 ```sh
-uv tool install 'git+ssh://git@github.com/tekkac/asdu.git'
-asdu --version
+uv tool install .
 asdu
 ```
 
-Update with `uv tool upgrade asdu`. If the command is not on your PATH, run
-`uv tool update-shell` and open a new terminal. Remove it with `uv tool uninstall asdu`.
-
-Alternatively, clone and install locally:
+Run `asdu` from a project folder to browse its sessions. To browse across
+your home directory and use conversation text for tagging:
 
 ```sh
-gh repo clone tekkac/asdu
-cd asdu
-uv tool install .
+asdu --project ~/ --content-keywords
 ```
 
-You can also run the script directly from a checkout:
+- `--project ~/` includes sessions associated with folders under your home
+  directory. Replace `~/` with any project folder.
+- `--content-keywords` also checks user messages for tag keywords.
+  The initial scan takes longer and shows progress.
 
-```sh
-# Browse sessions associated with the current directory.
-uv run asdu.py
+Use `asdu --help` (or `-h`) for all options, and `?` inside the app for keys.
+After updating the checkout, reinstall with `uv tool install --force .`.
+Copy source files only when moving between machines, not generated `build/` files.
 
-# Browse a project or every known project.
-uv run asdu.py --project ~/Code/example
-uv run asdu.py --all
+## Browse and review
 
-# Search user-authored session text for configured keywords.
-uv run asdu.py --content-keywords
-```
+Use the arrow keys to navigate, `Enter` to open, and `Backspace` to go back.
+The `›` marker and highlighted row show your selection.
 
-Use the arrow keys to navigate, `Enter` to open, `Backspace` to return, `r` to
-rescan, `?` for help, and `q` to quit. In a session group: `t` shows the native Codex
-conversation tree and `a` opens Archive/Trash actions.
+- Sort by size, name, or when the session file was updated with `s`.
+- Explore folders, tags, or session types with `g` to group.
+- Show only Codex or Claude with `f` to filter.
+- Search titles or the open brief with `/`; use `n` and `N` for matches.
+- Open a session brief with `Enter` to read request/reply excerpts and
+  find a command you can copy to resume the conversation.
+- Explore related conversations with `t` for tree view. Use `Space` to
+  fold a branch and `z` to expand or collapse all branches.
 
-Use `/text` to find a title in the current list or text in a brief. `n` and `N`
-move to the next and previous match, wrapping at the ends. Home/End jump to
-the beginning/end. Search reads only the titles or brief already displayed.
-Action and rescan errors appear in the bottom status line.
+Tree rows include their descendants' sizes; `(+N)` counts those descendants.
+The footer counts each session once. Relationships come from recorded metadata,
+so children without a known parent can appear on their own.
 
-## What it shows
+Briefs show basic information immediately while loading excerpts.
+Press `Backspace` to cancel loading or return to the list.
 
-- Transcript file sizes, relative update time, source, and session provenance.
-- CWD, tag, source, and origin groupings.
-- Native Codex parent/child trees. Cross-tag parents appear as structural
-  context. Claude sidechains are labelled `side`: Claude records do not expose
-  a parent session ID for them.
-- A local session brief with first/latest request, last reply, activity, and
-  native provenance, plus a copyable native resume command for Codex or Claude.
+Press `r` to rescan, `?` for help, or `q` to quit.
+Sizes refer to saved conversations, not your project files.
+The footer reports skipped files and invalid records encountered during discovery.
+This is a scan warning, not a full transcript integrity check.
 
-The built-in starter tags are `development`, `research`, `operations`,
-`security`, `tooling`, `data`, and `documentation`. Sessions that do not fit
-remain `untagged`; recurring local title/path patterns can supply a small set
-of inferred tags.
+## Clean up
 
-Sizes count transcript bytes associated with each working directory, not the
-project's files or filesystem allocated blocks. Tag groups use the first
-matching (primary) tag; the brief lists all matching tags. Each transcript
-appears in one tag group, and `all sessions` is a separate view of the total.
+Browsing changes nothing. Select a session and press `a` to choose:
 
-## Commands
+- **Archive** replaces the saved conversation with a compressed copy.
+  Archives are saved in `~/.local/share/asdu/archive/`
+  (or your XDG data directory). Decompress and restore the file to its original
+  location before resuming it; asdu has no archive browser.
+- **Trash** moves it to your system Trash, where you can restore it.
 
-```sh
-# Scriptable overview or list.
-uv run asdu.py summary --group source
-uv run asdu.py sessions --tag research
-
-# One structural brief; use an ID shown by the browser.
-uv run asdu.py digest --session 019f9a3a
-
-# Select one or more sources.
-uv run asdu.py --source codex --source claude --all
-
-# Replace starter tag rules with durable local rules.
-uv run asdu.py --config asdu.toml.example
-```
-
-`--content-keywords` scans only recognized user-message text. Its cache lives
-under `$XDG_CACHE_HOME/asdu/` or `~/.cache/asdu/`; changing tag keywords causes
-one cache rebuild. Normal browsing and briefs do not cache transcript data.
-
-## Safety and storage
-
-Browsing is read-only. `a` always opens an action chooser:
-
-- **Archive** writes a gzip copy under `$XDG_DATA_HOME/asdu/archive/` (or
-  `~/.local/share/asdu/archive/`) before removing the live transcript.
-  Each archive has a unique filename; the action log records its destination.
-- **Trash** uses the operating system’s recoverable Trash and checks again
-  that the transcript has not changed since scanning.
-
-Successful Archive and Trash actions append a content-free JSONL record to
-`$XDG_STATE_HOME/asdu/actions.jsonl` (or `~/.local/state/asdu/actions.jsonl`).
-
-asdu needs no account, API key, or hosted service. Its only runtime dependency
-is `send2trash`, installed automatically by uv for recoverable Trash support.
-
-## Supported sources
-
-| Source | Default local root | Notes |
-| --- | --- | --- |
-| Codex | `~/.codex/sessions` | Native parent-thread trees |
-| Claude | `~/.claude/projects` | Sidechains, no parent session link |
-
-Pass `--root` or `--claude-root` to use another location. The curses interface
-is intended for POSIX terminals. Additional source support is welcome; a source
-adapter only needs a local reader and synthetic fixtures.
+asdu keeps a local log of these actions.
+Close sessions in their original app before archiving or trashing them.
 
 ## Contributing
 
-Keep changes small, local, and dependency-free where possible. Add a synthetic
-fixture for each new or changed source-record shape—never a real transcript.
+Bug reports, UI improvements, and support for other agents are welcome.
+Keep changes small and use fictional sessions in tests.
+Keep normal browsing cache-free; justify additional caching with measurements.
+
+From a checkout, run `uv run asdu.py` to try the app. Run the tests with:
 
 ```sh
-python3 -m unittest tests/test_asdu.py
+python3 -m unittest discover -s tests
 ```
 
-The implementation deliberately keeps one runnable script: source inspection,
-shared scanning, classification, storage actions, UI, and CLI are separated by
-small functions rather than a framework or service layer.
+Test a fresh wheel on Debian with Python 3.11:
+
+```sh
+docker build -f tests/Dockerfile -t asdu-smoke .
+docker run --rm --network none asdu-smoke
+```
+
+This runs the unit tests and checks installation, discovery, briefs, trees,
+and archive/Trash recovery using disposable fixtures. No host folders are mounted.
+Touchpad scrolling and visual rendering still need a real-terminal check.
 
 ## License
 

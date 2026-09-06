@@ -32,6 +32,8 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 
+ASCII_UI = False
+
 DEFAULT_TAGS = [
     {
         "name": "research",
@@ -101,10 +103,12 @@ class Session:
     parent_id: str | None
     title: str
     tags: tuple[str, ...]
+    task_path: str = ""
+    forked_from: str = ""
 
 
 class ScanProgress:
-    """A dependency-free ncdu-like progress bar for the expensive text scan."""
+    """Startup splash and progress for local session scans."""
 
     def __init__(
         self,
@@ -115,7 +119,26 @@ class ScanProgress:
         self.render = render
         self.interactive = enabled and sys.stderr.isatty()
         self.last_percent = -1
-        self.last_width = 0
+        self.frame_rows = 0
+        self.last_frame = None
+        self.skipped: set[Path] = set()
+        self.invalid: set[Path] = set()
+        if self.interactive and render is None:
+            self.paint("", 0, 0, 0)
+
+    def paint(self, source: str, current: int, done: int, total: int) -> None:
+        try:
+            width = os.get_terminal_size(sys.stderr.fileno()).columns - 1
+        except OSError:
+            width = 79
+        lines = indexing_lines(width, source, current, done, total)
+        if lines == self.last_frame:
+            return
+        prefix = f"\033[{self.frame_rows}A" if self.frame_rows else ""
+        sys.stderr.write(prefix + "\r\033[J\033[1m" + "\n".join(lines) + "\033[0m\n")
+        sys.stderr.flush()
+        self.frame_rows = len(lines)
+        self.last_frame = lines
 
     def update(
         self, source: str, current: int, total: int, done_bytes: int, total_bytes: int
@@ -133,6 +156,9 @@ class ScanProgress:
         if self.render is not None:
             self.render(source, current, total, done_bytes, total_bytes)
             return
+        if self.interactive:
+            self.paint(source, current, done_bytes, total_bytes)
+            return
         # Do not flood redirected output; a terminal gets smooth updates.
         if not self.interactive and percent < 100 and percent == self.last_percent:
             return
@@ -144,23 +170,23 @@ class ScanProgress:
         suffix = f" {percent:3d}% {source} {current:,}/{total:,} {human_size(done_bytes)}/{human_size(total_bytes)}"
         bar_width = max(0, min(26, columns - len(suffix) - 3))
         if bar_width >= 8:
-            filled = int(bar_width * percent / 100)
-            line = f"[{'#' * filled}{'-' * (bar_width - filled)}]{suffix}"
+            line = f"{progress_bar(percent, bar_width)}{suffix}"
         else:
             line = suffix.strip()
         line = line[: max(1, columns - 1)]
-        if self.interactive:
-            sys.stderr.write("\r" + line + " " * max(0, self.last_width - len(line)))
-            self.last_width = len(line)
-            if percent == 100:
-                sys.stderr.write("\n")
-            sys.stderr.flush()
-        else:
-            print(line, file=sys.stderr, flush=True)
+        print(line, file=sys.stderr, flush=True)
 
     def finish(self) -> None:
-        if self.interactive and self.last_percent >= 0 and self.last_percent < 100:
-            print(file=sys.stderr)
+        if self.interactive:
+            sys.stderr.flush()
+
+    def notice(self) -> str:
+        parts = []
+        if self.skipped:
+            parts.append(f"{len(self.skipped)} files skipped")
+        if damaged := self.invalid - self.skipped:
+            parts.append(f"{len(damaged)} files contain invalid records")
+        return "; ".join(parts)
 
 
 class ContentCache:
@@ -261,12 +287,100 @@ def session_date(session: Session) -> str:
     return f"{seconds // (365 * 86400)}y ago"
 
 
+def ascii_ui() -> bool:
+    try:
+        "╭█".encode(sys.stderr.encoding or "utf-8")
+    except UnicodeEncodeError:
+        return True
+    return ASCII_UI
+
+
+def terminal_art(text: str) -> str:
+    """Keep content intact while replacing terminal decoration in ASCII mode."""
+    if ascii_ui():
+        return text.translate(
+            str.maketrans(
+                {
+                    **dict.fromkeys("╭╮╰╯├┌└┐┘┤╔╗╚╝╠╣┏┓┗┛┣┫", "+"),
+                    **dict.fromkeys("─━═", "-"),
+                    **dict.fromkeys("│┃║", "|"),
+                    "↑": "^",
+                    "↓": "v",
+                    "←": "<",
+                    "→": ">",
+                    "▸": ">",
+                    "›": ">",
+                    "▾": "v",
+                    "…": "~",
+                    "·": "/",
+                }
+            )
+        )
+    return text
+
+
 def size_bar(size: int, largest: int, width: int = 12) -> str:
-    """A small ncdu-style relative size bar for a visible group."""
-    if largest <= 0:
-        return "[" + " " * width + "]"
-    filled = min(width, max(1, round(width * size / largest))) if size else 0
-    return "[" + "#" * filled + " " * (width - filled) + "]"
+    """Fixed-cell relative usage, with eighth-cell precision for small items."""
+    width = max(0, width)
+    units = (
+        min(width * 8, max(1, size * width * 8 // largest))
+        if size > 0 and largest > 0 and width
+        else 0
+    )
+    filled, fraction = divmod(units, 8)
+    bar = "█" * filled + ("▏▎▍▌▋▊▉"[fraction - 1] if fraction else "")
+    bar += "░" * (width - len(bar))
+    if ascii_ui():
+        filled = min(width, filled + bool(fraction))
+        return "[" + "#" * filled + " " * (width - filled) + "]"
+    return bar
+
+
+def progress_bar(percent: int, width: int) -> str:
+    filled = min(width, max(0, width * percent // 100))
+    return "[" + ("#" if ascii_ui() else "=") * filled + " " * (width - filled) + "]"
+
+
+def splash_lines(width: int) -> list[str]:
+    if width < 32:
+        return []
+    return [
+        terminal_art(line)
+        for line in (
+            "╭──────────────────────────────╮",
+            "│    __ _  ___  __| | _  _     │",
+            "│   / _\x60 |(_-< / _\x60 || || |    │",
+            "╰───\\__,_|/__/ \\__,_| \\_,_|────╯",
+            "    agent session disk usage    ",
+        )
+    ]
+
+
+def indexing_lines(
+    width: int, source: str, current: int, done: int, total: int
+) -> list[str]:
+    percent = min(100, max(0, done * 100 // total)) if total else 0
+    if width < 32:
+        return [compact_text(f"indexing {source.lower()} {percent}%", max(0, width))]
+    count = f"{current:,} sessions"
+    status = source.lower() or "discovering"
+    row = lambda text: terminal_art(
+        "│ " + pad_display(compact_text(text, 28), 28) + " │"
+    )
+    return [
+        *splash_lines(width),
+        " " * 32,
+        terminal_art("╭─ indexing ───────────────────╮"),
+        row(
+            pad_display(
+                compact_text(status, max(0, 27 - len(count))), max(0, 28 - len(count))
+            )
+            + count
+        ),
+        row(f"{progress_bar(percent, 20)}  {percent:3d}%"),
+        row(f"{human_size(done)} / {human_size(total)}"),
+        terminal_art("╰──────────────────────────────╯"),
+    ]
 
 
 def compact_path(path: str, width: int) -> str:
@@ -311,6 +425,8 @@ def pad_display(text: str, width: int) -> str:
 
 def session_label(session: Session) -> str:
     """Keep an untitled marker for briefs, not the space-constrained list."""
+    if session.task_path:
+        return session.task_path.rstrip("/").rsplit("/", 1)[-1].replace("_", " ")
     return re.sub(r"^untitled\s+[—-]\s*", "", session.title, count=1) or session.title
 
 
@@ -330,7 +446,7 @@ def load_tag_rules(config: Path | None) -> list[TagRule]:
     # Built-ins are small, portable, and high-confidence.  A TOML file
     # deliberately replaces them with stable, user-owned rules.
     raw_rules: list[dict] = DEFAULT_TAGS
-    if config and config.exists():
+    if config is not None:
         with config.open("rb") as handle:
             data = tomllib.load(handle)
         raw_rules = data.get("tag", [])
@@ -339,6 +455,14 @@ def load_tag_rules(config: Path | None) -> list[TagRule]:
 
     rules: list[TagRule] = []
     for item in raw_rules:
+        if not isinstance(item, dict):
+            raise ValueError("each tag must be a table")
+        for field in ("paths", "keywords"):
+            values = item.get(field, [])
+            if not isinstance(values, list) or any(
+                not isinstance(value, str) for value in values
+            ):
+                raise ValueError(f"tag {field} must be a list of strings")
         name = str(item.get("name", "")).strip()
         if not name:
             raise ValueError("every tag needs a non-empty name")
@@ -365,7 +489,9 @@ def load_titles(codex_home: Path) -> dict[str, str]:
     return titles
 
 
-def iter_jsonl(path: Path, limit: int | None = None) -> Iterable[dict[str, object]]:
+def iter_jsonl(
+    path: Path, limit: int | None = None, progress: ScanProgress | None = None
+) -> Iterable[dict[str, object]]:
     """Yield valid JSON object records; changing transcripts remain harmless."""
     try:
         with path.open(encoding="utf-8", errors="replace") as handle:
@@ -375,49 +501,75 @@ def iter_jsonl(path: Path, limit: int | None = None) -> Iterable[dict[str, objec
                 try:
                     item = json.loads(line)
                 except json.JSONDecodeError:
+                    if progress is not None:
+                        progress.invalid.add(path)
                     continue
                 if isinstance(item, dict):
                     yield item
+                elif progress is not None:
+                    progress.invalid.add(path)
     except OSError:
         return
 
 
-def read_metadata(path: Path) -> tuple[str, str, str, str | None]:
+def task_metadata(payload: dict) -> tuple[str, str]:
+    """Use explicit spawn/fork fields, never infer a task from inherited text."""
+    spawn = payload.get("source")
+    for key in ("subagent", "thread_spawn"):
+        spawn = spawn.get(key) if isinstance(spawn, dict) else None
+    task = spawn.get("agent_path") if isinstance(spawn, dict) else None
+    fork = payload.get("forked_from_id")
+    return (
+        task if isinstance(task, str) and task.strip("/") else "",
+        fork if isinstance(fork, str) else "",
+    )
+
+
+def read_metadata(
+    path: Path, details: dict | None = None, progress: ScanProgress | None = None
+) -> tuple[str, str, str, str | None]:
     """Read only the initial metadata records, not a whole transcript."""
-    for item in iter_jsonl(path, 32):
+    for item in iter_jsonl(path, 32, progress):
         if item.get("type") != "session_meta":
             continue
         payload = item.get("payload", {})
         if not isinstance(payload, dict):
             break
+        if details is not None:
+            details.update(payload)
         cwd = payload.get("cwd")
         session_id = payload.get("id") or payload.get("session_id")
         parent_id = payload.get("parent_thread_id")
         thread_source = payload.get("thread_source")
-        originator = payload.get("originator")
         source = payload.get("source")
-        # `codex_exec` creates delegated worker sessions but records their
-        # thread source as "user".  Its explicit launcher fields are more
-        # reliable than that compatibility label.
-        if source == "exec" and originator == "codex_vscode":
-            origin = "ide"
-        elif source == "exec" and originator == "codex_exec":
-            origin = "automation"
-        elif thread_source in {"subagent", "guardian_review"} or isinstance(
-            source, dict
+        subagent = source.get("subagent") if isinstance(source, dict) else None
+        spawn = subagent.get("thread_spawn") if isinstance(subagent, dict) else None
+        if not isinstance(parent_id, str) or not parent_id:
+            parent_id = (
+                spawn.get("parent_thread_id") if isinstance(spawn, dict) else None
+            )
+        # Relationship and launcher are separate: an IDE can launch a child.
+        if thread_source == "guardian_review" or (
+            isinstance(subagent, dict) and subagent.get("other") == "guardian"
         ):
-            origin = "review" if thread_source == "guardian_review" else "subagent"
-        elif thread_source == "user":
-            origin = "user"
-        else:
+            origin = "review"
+        elif (
+            parent_id
+            or thread_source == "subagent"
+            or (isinstance(source, dict) and "subagent" in source)
+        ):
+            origin = "subagent"
+        elif thread_source == "user" or source in ("cli", "vscode", "exec"):
             origin = "primary"
+        else:
+            origin = "unknown"
         return (
             cwd if isinstance(cwd, str) else "(unknown)",
             session_id if isinstance(session_id, str) else path.stem,
             origin,
             parent_id if isinstance(parent_id, str) else None,
         )
-    return "(unknown)", path.stem, "primary", None
+    return "(unknown)", path.stem, "unknown", None
 
 
 def derive_title(path: Path) -> str:
@@ -427,47 +579,21 @@ def derive_title(path: Path) -> str:
     messages too, so those preambles are deliberately skipped.  The bounded
     scan keeps an inventory fast even when a rollout is hundreds of megabytes.
     """
-    ignored_prefixes = (
-        "<",
-        "# agents",
-        "here is a list of plugins",
-        "you are codex",
-        "each workspace has a .context",
-        "do not rename the current branch",
-        "by default, the user will only see",
-        "respond directly to the user's prompt",
-    )
     fallback = ""
     for item in iter_jsonl(path, 4096):
-        text = None
-        if item.get("type") == "event_msg":
-            payload = item.get("payload", {})
-            if isinstance(payload, dict) and payload.get("type") == "user_message":
-                text = payload.get("message")
-        elif item.get("type") == "response_item":
-            payload = item.get("payload", {})
-            if not isinstance(payload, dict):
-                continue
-            if payload.get("role") == "assistant":
-                texts = message_texts(payload)
-                if texts:
-                    fallback = texts[-1]
-                continue
-            if payload.get("role") != "user":
-                continue
-            content = payload.get("content", [])
-            if isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "input_text":
-                        text = block.get("text")
-                        break
-        if not isinstance(text, str):
-            continue
-        title = " ".join(text.split())
-        lowered = title.lower()
-        if len(title) < 12 or lowered.startswith(ignored_prefixes):
-            continue
-        return title[:90]
+        for text in user_texts("codex", item):
+            title = substantive_user_text(text)
+            if title:
+                return title[:90]
+        payload = item.get("payload")
+        if (
+            item.get("type") == "response_item"
+            and isinstance(payload, dict)
+            and payload.get("role") == "assistant"
+        ):
+            texts = message_texts(payload)
+            if texts:
+                fallback = texts[-1]
     return f"reply: {fallback}" if fallback else "untitled"
 
 
@@ -535,14 +661,14 @@ def substantive_user_text(text: str) -> str:
     return clean if is_real_user_text(clean) else ""
 
 
-def digest(session: Session) -> str:
+def digest(session: Session, poll: Callable[[], None] | None = None) -> str:
     try:
-        return read_digest(session)
+        return read_digest(session, poll)
     except OSError as error:
         return f"Transcript unavailable: {error.strerror or error}. Press r in the list to rescan."
 
 
-def read_digest(session: Session) -> str:
+def read_digest(session: Session, poll: Callable[[], None] | None = None) -> str:
     """Create a compact plain-text brief without calling a model."""
     first_user: str | None = None
     latest_user: str | None = None
@@ -550,6 +676,7 @@ def read_digest(session: Session) -> str:
     first_objective: str | None = None
     event_counts: Counter[str] = Counter()
     recorded_via: list[str] = []
+    task_path, forked_from = session.task_path, session.forked_from
 
     def remember_user(text: str) -> None:
         nonlocal first_user, latest_user
@@ -564,7 +691,9 @@ def read_digest(session: Session) -> str:
             latest_reply = text
 
     with session.path.open(encoding="utf-8", errors="replace") as handle:
-        for line in handle:
+        for index, line in enumerate(handle):
+            if poll is not None and index % 128 == 0:
+                poll()
             try:
                 item = json.loads(line)
             except json.JSONDecodeError:
@@ -575,6 +704,7 @@ def read_digest(session: Session) -> str:
             if session.source == "codex" and item.get("type") == "session_meta":
                 payload = item.get("payload")
                 if isinstance(payload, dict):
+                    task_path, forked_from = task_metadata(payload)
                     source = payload.get("source")
                     originator = payload.get("originator")
                     provider = payload.get("model_provider")
@@ -607,6 +737,8 @@ def read_digest(session: Session) -> str:
                         first_objective = first_objective or " ".join(
                             goal["objective"].split()
                         )
+            for text in user_texts(session.source, item):
+                remember_user(substantive_user_text(text))
             if session.source == "claude":
                 message = item.get("message")
                 if not isinstance(message, dict):
@@ -623,21 +755,9 @@ def read_digest(session: Session) -> str:
                     ]
                 else:
                     texts = []
-                if role == "user":
-                    for text in texts:
-                        remember_user(substantive_user_text(text))
-                elif role == "assistant":
+                if role == "assistant":
                     for text in texts:
                         remember_reply(text)
-                continue
-            if item.get("type") == "event_msg":
-                payload = item.get("payload")
-                if isinstance(payload, dict) and payload.get("type") == "user_message":
-                    text = payload.get("message")
-                    if isinstance(text, str):
-                        clean = " ".join(text.split())
-                        if is_real_user_text(clean):
-                            remember_user(clean)
                 continue
             if item.get("type") != "response_item":
                 continue
@@ -646,10 +766,7 @@ def read_digest(session: Session) -> str:
                 continue
             role = payload.get("role")
             texts = message_texts(payload)
-            if role == "user":
-                for text in texts:
-                    remember_user(substantive_user_text(text))
-            elif role == "assistant":
+            if role == "assistant":
                 for text in texts:
                     remember_reply(text)
 
@@ -666,9 +783,15 @@ def read_digest(session: Session) -> str:
         [first_objective] if first_objective else [first_user] if first_user else []
     )
     initial_label = "Initial objective" if first_objective else "First request"
+    if forked_from:
+        initial_label += " (may be inherited)"
     provenance = list(dict.fromkeys(recorded_via))
     metadata = [f"Recorded via: {' · '.join(provenance)}"] if provenance else []
-    if session.parent_id:
+    if task_path:
+        metadata.append(f"Task: {task_path}")
+    if forked_from:
+        metadata.append(f"Forked from: {forked_from}")
+    if session.parent_id and session.parent_id != forked_from:
         # The stored parent link supports tree navigation.  It is not evidence
         # that this was created using a conversation-fork operation.
         metadata.append(f"Parent session: {session.parent_id}")
@@ -676,9 +799,10 @@ def read_digest(session: Session) -> str:
     lines = [
         f"{activity} across {events:,} events; {compactions:,} compactions.",
         f"ID: {session.session_id}",
+        f"Session type: {origin_label(session.origin)}",
         *metadata,
         "",
-        f"┌ {initial_label}",
+        f"╭ {initial_label}",
         *excerpts(initial, 0, "│ "),
         "",
         "├ Latest request",
@@ -686,7 +810,7 @@ def read_digest(session: Session) -> str:
         "",
         "├ Last reply",
         *excerpts([latest_reply] if latest_reply else [], 0, "│ "),
-        "└",
+        "╰",
         "",
         f"Folder: {session.cwd}",
         f"Tags: {', '.join(session.tags)}",
@@ -982,9 +1106,12 @@ def scan_paths(
         session = inspect(path)
         done_bytes += size
         if session is None:
+            progress.skipped.add(path)
             progress.update(label, index, len(discovered), done_bytes, total_bytes)
             continue
         if not in_scope(session, scope):
+            if session.cwd == "(unknown)":
+                progress.skipped.add(path)
             progress.update(label, index, len(discovered), done_bytes, total_bytes)
             continue
         matches = (
@@ -1025,15 +1152,32 @@ def scan_codex(
         try:
             stat = path.stat()
             size, modified = stat.st_size, stat.st_mtime
-            cwd, session_id, origin, parent_id = read_metadata(path)
+            details: dict = {}
+            cwd, session_id, origin, parent_id = read_metadata(path, details, progress)
         except OSError:
             return None
+        if not details:
+            return None
         session = Session(
-            path, size, modified, "codex", origin, cwd, session_id, parent_id, "", ()
+            path,
+            size,
+            modified,
+            "codex",
+            origin,
+            cwd,
+            session_id,
+            parent_id,
+            "",
+            (),
+            *task_metadata(details),
         )
         if not in_scope(session, scope):
             return session
-        title = titles.get(session_id) or untitled_title(derive_title(path))
+        title = (
+            session_label(session)
+            if session.task_path
+            else titles.get(session_id) or untitled_title(derive_title(path))
+        )
         return replace(session, title=title)
 
     return scan_paths(
@@ -1060,33 +1204,28 @@ def scan_claude(
     """Small native Claude reader: CWD + session id live in normal JSONL events."""
 
     def inspect(path: Path) -> Session | None:
-        cwd, session_id, origin, parent_id = "(unknown)", path.stem, "primary", None
+        cwd, session_id, origin, parent_id = "(unknown)", path.stem, "unknown", None
         title = "untitled"
         fallback = ""
-        for item in iter_jsonl(path, 4096):
+        recognized = False
+        for item in iter_jsonl(path, 4096, progress):
             if isinstance(item.get("cwd"), str):
                 cwd = item["cwd"]
             if isinstance(item.get("sessionId"), str):
                 session_id = item["sessionId"]
+                recognized = True
+            if item.get("isSidechain") is False and origin != "sidechain":
+                origin = "primary"
             if item.get("isSidechain") is True:
                 # Claude exposes message parents, not a parent session.
                 origin = "sidechain"
             message = item.get("message")
-            candidate = ""
-            if (
-                title == "untitled"
-                and isinstance(message, dict)
-                and message.get("role") == "user"
-            ):
-                candidate = content_text(message.get("content"))
-            elif (
-                title == "untitled"
-                and item.get("type") == "queue-operation"
-                and item.get("operation") == "enqueue"
-            ):
-                content = item.get("content")
-                candidate = content if isinstance(content, str) else ""
-            elif isinstance(message, dict) and message.get("role") == "assistant":
+            candidate = (
+                next(iter(user_texts("claude", item)), "")
+                if title == "untitled"
+                else ""
+            )
+            if isinstance(message, dict) and message.get("role") == "assistant":
                 fallback = content_text(message.get("content")) or fallback
             if candidate:
                 clean = substantive_user_text(candidate)
@@ -1094,6 +1233,8 @@ def scan_claude(
                     title = clean[:90]
             if cwd != "(unknown)" and session_id != path.stem and title != "untitled":
                 break
+        if not recognized and cwd == "(unknown)":
+            return None
         try:
             stat = path.stat()
             size, modified = stat.st_size, stat.st_mtime
@@ -1202,6 +1343,11 @@ def browser_visible_sessions(
     ]
 
 
+def item_key(item: tuple[str, str, list[Session]]) -> str:
+    kind, name, entries = item
+    return row_id(entries[0]) if kind == "session" else f"{kind}:{name}"
+
+
 def browser_group_items(
     sessions: list[Session], mode: str, sort_by: str
 ) -> list[tuple[str, str, list[Session]]]:
@@ -1223,7 +1369,7 @@ def group_label(name: str, mode: str) -> str:
 
 
 def sort_label(sort_by: str) -> str:
-    return {"size": "size↓", "date": "date↓", "count": "count↓", "name": "name↑"}[
+    return {"size": "size↓", "date": "updated↓", "count": "count↓", "name": "name↑"}[
         sort_by
     ]
 
@@ -1282,7 +1428,7 @@ def cwd_listing(
         ("folder", name, entries) for name, entries in ordered_groups(folders, sort_by)
     ]
     if sort_by == "name":
-        direct.sort(key=lambda session: session.title.lower())
+        direct.sort(key=lambda session: session_label(session).casefold())
     elif sort_by == "date":
         direct.sort(key=lambda session: session.modified, reverse=True)
     else:
@@ -1302,10 +1448,11 @@ def relative_folder(directory: Path, root: Path) -> str:
 def print_summary(sessions: list[Session], mode: str, sort_by: str) -> None:
     groups = ordered_groups(group_sessions(sessions, mode), sort_by)
     width = max((len(name) for name, _ in groups), default=10)
+    label = {"cwd": "folder", "origin": "session type"}.get(mode, mode)
     print(
-        f"{len(sessions):,} sessions  {human_size(sum(s.size for s in sessions))}  grouped by {mode}\n"
+        f"{len(sessions):,} sessions  {human_size(sum(s.size for s in sessions))}  grouped by {label}\n"
     )
-    print(f"{'virtual folder':<{width}}  sessions       size")
+    print(f"{'group':<{width}}  sessions       size")
     print(f"{'-' * width}  --------  ---------")
     for name, entries in groups:
         print(
@@ -1331,23 +1478,41 @@ def draw_line(
     color: int = 0,
     bold: bool = False,
     invert: bool = False,
+    striped: bool = False,
+    pointer: bool = False,
 ) -> None:
     height, width = window.getmaxyx()
     if row >= height or width < 2:
         return
-    text = compact_text(text, width - 1)
-    if invert or selected:
+    if selected and pointer:
+        text = "›" + text[1:]
+    text = compact_text(terminal_art(text), width - 1)
+    if invert or selected or striped:
         text = pad_display(text, width - 1)
     attr = (
         curses.A_REVERSE
         if selected
-        else (curses.color_pair(color) if color else curses.A_NORMAL)
+        else (
+            curses.color_pair(color + 16)
+            if striped
+            else curses.color_pair(color)
+            if color
+            else curses.A_NORMAL
+        )
     )
     if bold:
         attr |= curses.A_BOLD
     if invert:
         attr |= curses.A_REVERSE
     window.addnstr(row, 0, text, max(0, width - 1), attr)
+    for match in re.finditer("░+", text):
+        window.addnstr(
+            row,
+            display_width(text[: match.start()]),
+            match.group(),
+            len(match.group()),
+            attr | curses.A_DIM,
+        )
 
 
 def origin_color(origin: str) -> int:
@@ -1367,22 +1532,35 @@ def source_color(source: str) -> int:
 
 
 def draw_session_line(
-    window: curses.window, row: int, session: Session, selected: bool, branch: str = ""
+    window: curses.window,
+    row: int,
+    session: Session,
+    selected: bool,
+    branch: str = "",
+    stats: tuple[int, int] | None = None,
+    striped: bool = False,
 ) -> None:
     """Keep source identity visible without sacrificing selection contrast."""
     _, width = window.getmaxyx()
-    prefix = f"  {human_size(session.size):>10}  "
+    size, descendants = stats if stats is not None else (session.size, 0)
+    prefix = f"  {human_size(size):>10}  "
     source = f"{session.source:<6}"
-    kind = f"  {origin_label(session.origin):<6}  {branch}"
+    kind = f"  {origin_label(session.origin):<6}  {terminal_art(branch)}"
     date = f"  {session_date(session):>8}"
     title_width = max(0, width - 1 - display_width(prefix + source + kind + date))
-    title = pad_display(compact_text(session_label(session), title_width), title_width)
+    count = f" (+{descendants})" if descendants else ""
+    title = pad_display(
+        compact_text(session_label(session), max(0, title_width - len(count))) + count,
+        title_width,
+    )
     suffix = kind + title + date
     if selected:
-        draw_line(window, row, prefix + source + suffix, selected=True)
+        draw_line(window, row, prefix + source + suffix, selected=True, pointer=True)
         return
     _, width = window.getmaxyx()
     limit = max(0, width - 1)
+    if striped:
+        draw_line(window, row, "", striped=True)
     column = 0
     for text, color in (
         (prefix, 0),
@@ -1391,7 +1569,13 @@ def draw_session_line(
     ):
         if column >= limit:
             break
-        attr = curses.color_pair(color) if color else curses.A_NORMAL
+        attr = (
+            curses.color_pair(color + 16)
+            if striped
+            else curses.color_pair(color)
+            if color
+            else curses.A_NORMAL
+        )
         if text == source:
             attr |= curses.A_BOLD
         text = compact_text(text, limit - column)
@@ -1401,7 +1585,7 @@ def draw_session_line(
 
 def ordered_sessions(sessions: Iterable[Session], sort_by: str) -> list[Session]:
     if sort_by == "name":
-        return sorted(sessions, key=lambda session: session.title.lower())
+        return sorted(sessions, key=lambda session: session_label(session).casefold())
     if sort_by == "date":
         return sorted(sessions, key=lambda session: session.modified, reverse=True)
     return sorted(sessions, key=lambda session: session.size, reverse=True)
@@ -1506,124 +1690,86 @@ def disable_delete_confirmation() -> None:
         pass
 
 
-def confirm_session_action(window: curses.window, session: Session) -> str | None:
-    height, width = window.getmaxyx()
-    if height < 8 or width < 58:
-        window.erase()
-        draw_line(window, 1, "Archive or Trash selected session?", bold=True)
-        draw_line(window, 3, "a Archive  t Trash  any key Cancel")
-        window.refresh()
-        key = window.getch()
-        return (
-            "archive"
-            if key in (ord("a"), ord("A"))
-            else "trash"
-            if key in (ord("t"), ord("T"), ord("y"), ord("Y"))
-            else None
-        )
-    box_width = max(32, min(72, width - 4))
-    left = max(0, (width - box_width) // 2)
-    top = max(0, (height - 8) // 2)
-    inner = box_width - 2
-    title = " Session action "
-    top_border = "┌──" + title + "─" * max(0, inner - len(title) - 2) + "┐"
-    bottom_border = "└" + "─" * inner + "┘"
-    window.addnstr(top, left, top_border, box_width)
-    for row in range(top + 1, top + 7):
-        window.addnstr(row, left, "│" + " " * inner + "│", box_width)
-    window.addnstr(top + 7, left, bottom_border, box_width)
-    window.addnstr(top + 1, left + 2, "Selected session", inner - 2, curses.A_BOLD)
-    # Keep the title on its own line.  Quoting it inside a sentence made the
-    # truncation look like malformed dialog text on narrower terminals.
-    window.addnstr(
-        top + 2, left + 2, compact_text(session_label(session), inner - 4), inner - 2
-    )
-    window.addnstr(
-        top + 3,
-        left + 2,
-        "Archive compresses it; Trash is system-recoverable.",
-        inner - 2,
-    )
-    window.addnstr(
-        top + 4, left + 2, f"{session.source}  {human_size(session.size)}", inner - 2
-    )
-    choices = ["archive", "trash", "cancel"]
-    selected = 0
+def action_dialog(window, title, body, options, default, shortcuts):
+    """Use identical keys and confirmation defaults at every terminal size."""
+    selected = options.index(default)
     while True:
-        window.addnstr(top + 6, left + 1, " " * inner, inner)
-        labels = [f" {choice} " for choice in choices]
-        total = sum(len(label) for label in labels) + 6
-        column = left + max(2, (box_width - total) // 2)
-        for index, label in enumerate(labels):
-            window.addnstr(
-                top + 6,
-                column,
-                label,
-                len(label),
-                curses.A_REVERSE if index == selected else curses.A_NORMAL,
+        height, width = window.getmaxyx()
+        boxed = width >= 44 and height >= len(body) + len(options) + 5
+        box_width = min(72, width - 4) if boxed else max(1, width - 1)
+        left = (width - box_width) // 2 if boxed else 0
+        top = (height - len(body) - len(options) - 4) // 2 if boxed else 0
+        if not boxed:
+            window.erase()
+        inner = box_width - 2
+        lines = [title, *body, "", *options]
+        for index, line in enumerate(lines):
+            row = top + index + int(boxed)
+            if row >= height:
+                break
+            is_option = index >= len(body) + 2
+            active = is_option and index - len(body) - 2 == selected
+            text = (
+                pad_display(compact_text(" " + line, max(0, inner)), max(0, inner))
+                if boxed
+                else compact_text(line, box_width)
             )
-            column += len(label) + 3
+            if boxed:
+                text = terminal_art("│" + text + "│")
+            window.addnstr(
+                row,
+                left,
+                text,
+                box_width,
+                curses.A_REVERSE if active else curses.A_NORMAL,
+            )
+        if boxed:
+            window.addnstr(top, left, terminal_art("╭" + "─" * inner + "╮"), box_width)
+            window.addnstr(
+                top + len(lines) + 1,
+                left,
+                terminal_art("╰" + "─" * inner + "╯"),
+                box_width,
+            )
         window.refresh()
         key = window.getch()
-        if key in (curses.KEY_LEFT, curses.KEY_UP, ord("h"), ord("k")):
-            selected = max(0, selected - 1)
-        elif key in (curses.KEY_RIGHT, curses.KEY_DOWN, ord("l"), ord("j")):
-            selected = min(len(choices) - 1, selected + 1)
-        elif key in (curses.KEY_ENTER, 10, 13):
-            return {"archive": "archive", "trash": "trash", "cancel": None}[
-                choices[selected]
-            ]
-        elif key in (ord("y"), ord("Y")):
-            return "trash"
-        elif key in (ord("a"), ord("A")):
-            return "archive"
-        elif key in (ord("n"), ord("N"), 27):
+        if key in (27, ord("q"), ord("n"), ord("N")):
             return None
+        if key in shortcuts:
+            return shortcuts[key]
+        if key in (curses.KEY_ENTER, 10, 13):
+            choice = options[selected]
+            return None if choice in ("cancel", "no") else choice
+        if key in (curses.KEY_UP, curses.KEY_LEFT, ord("k"), ord("h")):
+            selected = max(0, selected - 1)
+        elif key in (curses.KEY_DOWN, curses.KEY_RIGHT, ord("j"), ord("l")):
+            selected = min(len(options) - 1, selected + 1)
+
+
+def confirm_session_action(window: curses.window, session: Session) -> str | None:
+    return action_dialog(
+        window,
+        "Session action",
+        [session_label(session), "Archive compresses; Trash is recoverable."],
+        ["archive", "trash", "cancel"],
+        "archive",
+        {
+            ord(key): choice
+            for keys, choice in (("aA", "archive"), ("tT", "trash"))
+            for key in keys
+        },
+    )
 
 
 def confirm_trash(window: curses.window) -> str | None:
-    """Confirm the irreversible-in-practice choice without hiding Archive."""
-    height, width = window.getmaxyx()
-    if height < 7 or width < 44:
-        return "yes" if window.getch() in (ord("y"), ord("Y")) else None
-    box_width = min(58, width - 4)
-    left = max(0, (width - box_width) // 2)
-    top = max(0, (height - 6) // 2)
-    inner = box_width - 2
-    window.addnstr(
-        top, left, "┌── Confirm Trash " + "─" * max(0, inner - 17) + "┐", box_width
+    return action_dialog(
+        window,
+        "Confirm Trash",
+        ["Move this session to system Trash?"],
+        ["yes", "no", "don't ask again"],
+        "no",
+        {ord("y"): "yes", ord("Y"): "yes"},
     )
-    for row in range(top + 1, top + 5):
-        window.addnstr(row, left, "│" + " " * inner + "│", box_width)
-    window.addnstr(top + 5, left, "└" + "─" * inner + "┘", box_width)
-    window.addnstr(
-        top + 1, left + 2, "Move the selected session to system Trash?", inner - 2
-    )
-    options = ["yes", "no", "don't ask again"]
-    selected = 1
-    while True:
-        column = left + 3
-        window.addnstr(top + 3, left + 1, " " * inner, inner)
-        for index, option in enumerate(options):
-            label = f" {option} "
-            window.addnstr(
-                top + 3,
-                column,
-                label,
-                len(label),
-                curses.A_REVERSE if index == selected else curses.A_NORMAL,
-            )
-            column += len(label) + 3
-        window.refresh()
-        key = window.getch()
-        if key in (curses.KEY_LEFT, curses.KEY_UP, ord("h"), ord("k")):
-            selected = max(0, selected - 1)
-        elif key in (curses.KEY_RIGHT, curses.KEY_DOWN, ord("l"), ord("j")):
-            selected = min(len(options) - 1, selected + 1)
-        elif key in (curses.KEY_ENTER, 10, 13):
-            return options[selected] if options[selected] != "no" else None
-        elif key in (27, ord("n"), ord("N")):
-            return None
 
 
 def row_id(entry: Session) -> str:
@@ -1652,12 +1798,77 @@ def parent_links(entries: Iterable[Session]) -> dict[str, str]:
     return links
 
 
+def subtree_stats(entries: Iterable[Session]) -> dict[str, tuple[int, int]]:
+    """Physical bytes and descendant counts; shared history is not deduplicated."""
+    unique = {row_id(entry): entry for entry in entries}
+    links = parent_links(unique.values())
+    totals = {key: [entry.size, 0] for key, entry in unique.items()}
+    for key, entry in unique.items():
+        while key in links:
+            key = links[key]
+            totals[key][0] += entry.size
+            totals[key][1] += 1
+    return {key: (size, count) for key, (size, count) in totals.items()}
+
+
+def brief_sizes(session: Session, entries: Iterable[Session]) -> str:
+    total, descendants = subtree_stats(entries).get(row_id(session), (session.size, 0))
+    sizes = f"File: {human_size(session.size)}"
+    if descendants:
+        sizes += f"\nTree: {human_size(total)} including {descendants} descendants in this view"
+    return sizes
+
+
+def session_brief(session: Session, entries: Iterable[Session]) -> str:
+    return brief_sizes(session, entries) + "\n\n" + digest(session)
+
+
+class BriefCancelled(Exception):
+    """Return to the browser without finishing the transcript scan."""
+
+
+def open_brief(
+    window: curses.window, session: Session, entries: Iterable[Session]
+) -> None:
+    """Draw known metadata first; poll for cancellation during the full scan."""
+    sizes = brief_sizes(session, entries)
+    known = [sizes, f"ID: {session.session_id}", f"Folder: {session.cwd}"]
+    if session.task_path:
+        known.append(f"Task: {session.task_path}")
+    if session.forked_from:
+        known.append(f"Forked from: {session.forked_from}")
+    if command := resume_command(session):
+        known.append(f"Resume: {command}")
+    window.erase()
+    draw_line(window, 0, session_label(session), bold=True)
+    draw_line(window, 1, "Reading conversation…  Backspace return")
+    for row, line in enumerate("\n".join(known).splitlines(), 3):
+        draw_line(window, row, line)
+    window.refresh()
+
+    def poll() -> None:
+        if window.getch() in (127, 8, curses.KEY_BACKSPACE, 27, ord("q"), 10, 13):
+            raise BriefCancelled
+
+    window.nodelay(True)
+    try:
+        poll()
+        body = digest(session, poll)
+        poll()
+    except BriefCancelled:
+        return
+    finally:
+        window.nodelay(False)
+    text_view(window, session_label(session), sizes + "\n\n" + body)
+
+
 def session_tree(
     entries: list[Session], sort_by: str, collapsed: set[str] | None = None
 ) -> list[tuple[Session, str]]:
     """Return a stable, forest-shaped view using native parent thread IDs."""
     collapsed = collapsed or set()
     links = parent_links(entries)
+    stats = subtree_stats(entries)
     children: dict[str, list[Session]] = defaultdict(list)
     roots: list[Session] = []
     for entry in entries:
@@ -1666,11 +1877,11 @@ def session_tree(
         else:
             roots.append(entry)
     if sort_by == "name":
-        key = lambda entry: (entry.title.lower(),)
+        key = lambda entry: (session_label(entry).casefold(),)
     elif sort_by == "date":
-        key = lambda entry: (-entry.modified, entry.title.lower())
+        key = lambda entry: (-entry.modified, session_label(entry).casefold())
     else:
-        key = lambda entry: (-entry.size, entry.title.lower())
+        key = lambda entry: (-stats[row_id(entry)][0], session_label(entry).casefold())
     roots.sort(key=key)
     for nodes in children.values():
         nodes.sort(key=key)
@@ -1886,6 +2097,7 @@ def text_view(window: curses.window, title: str, body: str) -> None:
     """Scrollable pane for a selected session's structural summary."""
     offset = 0
     query = ""
+    match_index = -1
     while True:
         window.erase()
         height, width = window.getmaxyx()
@@ -1895,7 +2107,9 @@ def text_view(window: curses.window, title: str, body: str) -> None:
         offset = min(offset, max(0, len(lines) - max(1, height - 2)))
         draw_line(window, 0, title, bold=True)
         for row, line in enumerate(lines[offset : offset + height - 2], 2):
-            draw_line(window, row, line, bold=line.startswith(("┌ ", "├ ", "└")))
+            draw_line(
+                window, row, terminal_art(line), bold=line.startswith(("╭ ", "├ ", "╰"))
+            )
         window.refresh()
         maximum = max(0, len(lines) - max(1, height - 2))
         key = read_navigation(window, offset == 0, offset >= maximum)
@@ -1928,10 +2142,11 @@ def text_view(window: curses.window, title: str, body: str) -> None:
         elif key in (ord("/"), ord("n"), ord("N")):
             if key == ord("/"):
                 query = search_prompt(window)
-            offset = min(
-                maximum,
-                max(0, find_match(lines, query, offset, -1 if key == ord("N") else 1)),
+                match_index = offset - 1
+            match_index = find_match(
+                lines, query, match_index, -1 if key == ord("N") else 1
             )
+            offset = min(maximum, max(0, match_index))
 
 
 def choose(
@@ -1939,12 +2154,44 @@ def choose(
 ) -> str | None:
     """A small htop-like keyboard chooser for a field with few values."""
     selected = options.index(current) if current in options else 0
+    labels = {"cwd": "folder", "origin": "session type", "date": "updated"}
     while True:
         window.erase()
-        draw_line(window, 0, title, bold=True, invert=True)
-        draw_line(window, 1, "↑↓ choose  Enter apply  Esc cancel")
+        height, width = window.getmaxyx()
+        boxed = width >= 38 and height >= len(options) + 5
+        inner = min(48, width - 3)
+        if boxed:
+            label = " " + compact_text(title, inner - 4) + " "
+            draw_line(
+                window,
+                0,
+                terminal_art(
+                    "╭─" + label + "─" * (inner - 1 - display_width(label)) + "╮"
+                ),
+                bold=True,
+            )
+            draw_line(
+                window,
+                1,
+                terminal_art(
+                    "│" + " ↑↓ choose  Enter apply  Esc cancel".ljust(inner) + "│"
+                ),
+            )
+            draw_line(window, 2, terminal_art("│" + " " * inner + "│"))
+        else:
+            draw_line(window, 0, title, bold=True, invert=True)
+            draw_line(window, 1, "↑↓ choose  Enter apply  Esc cancel")
         for row, option in enumerate(options, 3):
-            draw_line(window, row, option, selected=row - 3 == selected)
+            label = labels.get(option, option)
+            if boxed:
+                text = pad_display(compact_text(" " + label, inner), inner)
+                draw_line(window, row, terminal_art("│" + text + "│"))
+                if row - 3 == selected:
+                    window.addnstr(row, 1, text, len(text), curses.A_REVERSE)
+            else:
+                draw_line(window, row, label, selected=row - 3 == selected)
+        if boxed:
+            draw_line(window, len(options) + 3, terminal_art("╰" + "─" * inner + "╯"))
         window.refresh()
         key = window.getch()
         if key in (27, ord("q")):
@@ -1964,10 +2211,12 @@ def tui(
     scope: Path | None,
     ask_before_delete: bool,
     rescan: Callable[[Callable[[str, int, int, int, int], None]], list[Session]],
+    scan_notice: Callable[[], str] = lambda: "",
 ) -> None:
     """A small ncdu-like drill-down UI with explicit archive/Trash actions."""
 
     def run(window: curses.window) -> None:
+        stripes = False
         curses.curs_set(0)
         # ncdu likewise leaves touchpad/mouse handling to the terminal.
         # Curses' mouse reports differ between terminal emulators and can turn
@@ -1992,6 +2241,14 @@ def tui(
             else:
                 curses.init_pair(7, curses.COLOR_CYAN, -1)
                 curses.init_pair(8, curses.COLOR_YELLOW, -1)
+            if curses.COLORS >= 256 and curses.COLOR_PAIRS > 24:
+                try:
+                    for color in range(9):
+                        foreground, _ = curses.pair_content(color)
+                        curses.init_pair(color + 16, foreground, 235)
+                    stripes = True
+                except curses.error:
+                    pass
         mode, sort_by, selected, detail, source_filter, tree_mode = (
             initial_mode,
             initial_sort,
@@ -2000,18 +2257,27 @@ def tui(
             "all",
             False,
         )
-        detail_return: tuple[int, int] | None = None
+        detail_return: tuple[str, int] | None = None
         browser = BrowserState.create()
         collapsed_nodes: set[str] = set()
         cwd_root = scope or Path("/")
         cwd_node = cwd_root
         confirm_deletes = ask_before_delete
         offset = 0
+        pending_anchor = None
+        folder_positions = {}
         query = ""
         status = ""
 
         def refresh_view() -> None:
-            nonlocal detail, detail_return, selected, offset, tree_mode, collapsed_nodes
+            nonlocal \
+                detail, \
+                detail_return, \
+                selected, \
+                offset, \
+                tree_mode, \
+                collapsed_nodes, \
+                pending_anchor
             _, current = browser_visible_sessions(
                 sessions, source_filter, mode, cwd_node
             )
@@ -2019,17 +2285,22 @@ def tui(
                 return
             anchor = row_id(display_entries[selected][0]) if display_entries else None
             name = detail[0]
-            entries = next(
-                (
-                    es
-                    for _, key, es in browser_group_items(current, mode, sort_by)
-                    if key == name
-                ),
-                [],
+            entries = (
+                [s for s in current if Path(s.cwd).resolve() == cwd_node]
+                if mode == "cwd"
+                else next(
+                    (
+                        es
+                        for _, key, es in browser_group_items(current, mode, sort_by)
+                        if key == name
+                    ),
+                    [],
+                )
             )
             if not entries:
                 detail = None
-                selected, offset = detail_return or (0, 0)
+                pending_anchor, offset = detail_return or (None, 0)
+                selected = 0
                 detail_return = None
                 browser.close_group()
                 return
@@ -2057,41 +2328,66 @@ def tui(
             )
             if detail is not None and not detail[1]:
                 detail = None
-                selected, offset = detail_return or (0, 0)
+                pending_anchor, offset = detail_return or (None, 0)
+                selected = 0
                 detail_return = None
                 continue
             if detail is None:
                 if mode == "cwd":
                     items = cwd_listing(visible, cwd_node, sort_by)
-                    if cwd_node != cwd_root:
-                        items.insert(0, ("parent", "..", []))
+                    direct = [es[0] for kind, _, es in items if kind == "session"]
+                    tree_entries = tree_with_ancestors(direct, visible)
+                    tree_mode, collapsed_nodes = browser.open_group(
+                        mode, str(cwd_node), source_filter, cwd_node, tree_entries
+                    )
+                    folder_rows = [item for item in items if item[0] != "session"]
+                    session_rows = tree_rows(
+                        direct, visible, sort_by, tree_mode, collapsed_nodes
+                    )
+                    branches = {row_id(entry): branch for entry, branch in session_rows}
+                    items = folder_rows + [
+                        ("session", entry.title, [entry]) for entry, _ in session_rows
+                    ]
+                    if pending_anchor is not None and tree_mode:
+                        links = parent_links(tree_entries)
+                        shown = {item_key(item) for item in items}
+                        while pending_anchor not in shown and pending_anchor in links:
+                            pending_anchor = links[pending_anchor]
                 else:
+                    tree_mode = False
                     items = browser_group_items(grouped_visible, mode, sort_by)
+                if pending_anchor is not None:
+                    selected = next(
+                        (
+                            i
+                            for i, item in enumerate(items)
+                            if item_key(item) == pending_anchor
+                        ),
+                        selected,
+                    )
+                    pending_anchor = None
                 selected, offset = clamp_view(selected, offset, len(items), page_size)
-                back = (
-                    "  Backspace back" if mode == "cwd" and cwd_node != cwd_root else ""
-                )
-                draw_line(
-                    window,
-                    0,
-                    f" asdu  |  ↑↓ select  Enter open{back}  r rescan  ? help  q quit ",
-                    bold=True,
-                    invert=True,
-                )
                 if mode == "cwd":
                     location = relative_folder(cwd_node, cwd_root)
                 else:
                     location = {
                         "tag": "tags",
                         "source": "sources",
-                        "origin": "kinds",
+                        "origin": "session types",
                     }.get(mode, mode)
-                if source_filter != "all":
-                    location += f" · {source_filter}"
-                breadcrumb = f"--- {location}  sort: {sort_label(sort_by)}  [g]roup  [f]ilter  [s]ort "
-                draw_line(
-                    window, 1, breadcrumb + "-" * max(0, width - len(breadcrumb) - 1)
+                stats = (
+                    subtree_stats(tree_entries) if mode == "cwd" and tree_mode else {}
                 )
+                gap = next(
+                    (
+                        i
+                        for i in range(1, len(items))
+                        if items[i][0] == "session" and items[i - 1][0] != "session"
+                    ),
+                    0,
+                )
+                if selected - offset + int(offset < gap <= selected) >= page_size:
+                    offset += 1
                 largest_group = max(
                     (sum(item.size for item in entries) for _, _, entries in items),
                     default=0,
@@ -2099,28 +2395,39 @@ def tui(
                 for index, (kind, name, entries) in enumerate(
                     items[offset : offset + page_size], offset
                 ):
+                    row = index - offset + 2 + int(offset < gap <= index)
+                    if row >= height - 2:
+                        break
                     display_name = (
                         "/" + name if kind == "folder" else group_label(name, mode)
                     )
                     group_size = sum(item.size for item in entries)
                     if kind == "session":
                         draw_session_line(
-                            window, index - offset + 3, entries[0], index == selected
+                            window,
+                            row,
+                            entries[0],
+                            index == selected,
+                            branches.get(row_id(entries[0]), "")
+                            if mode == "cwd"
+                            else "",
+                            stats.get(row_id(entries[0])),
+                            striped=stripes and bool(index % 2),
                         )
                         continue
-                    elif kind == "parent":
-                        text, color = f"{'':>10}  {'':14}  {'':>5}  /..", 0
                     else:
-                        name_width = max(1, width - 38)
+                        name_width = max(1, width - 24 - len(size_bar(0, 1)))
                         display = compact_text(display_name, name_width)
                         text = f"{human_size(group_size):>10}  {size_bar(group_size, largest_group)}  {len(entries):>5}  {pad_display(display, name_width)}"
                         color = origin_color(name) if mode == "origin" else 0
                     draw_line(
                         window,
-                        index - offset + 3,
+                        row,
                         "  " + text,
                         index == selected,
                         color,
+                        striped=stripes and bool(index % 2),
+                        pointer=True,
                     )
                 total = len(items)
             else:
@@ -2133,6 +2440,16 @@ def tui(
                 display_entries = tree_rows(
                     entries, grouped_visible, sort_by, tree_mode, collapsed_nodes
                 )
+                if pending_anchor is not None:
+                    selected = next(
+                        (
+                            i
+                            for i, (entry, _) in enumerate(display_entries)
+                            if row_id(entry) == pending_anchor
+                        ),
+                        selected,
+                    )
+                    pending_anchor = None
                 # Keep a hierarchy alongside the flattened rendering so tree
                 # mode can move between siblings and parent/child nodes.
                 display_index = {
@@ -2159,44 +2476,88 @@ def tui(
                 selected, offset = clamp_view(
                     selected, offset, len(display_entries), page_size
                 )
-                navigation = (
-                    "↑↓ siblings  ←→ tree  Space fold  z all"
-                    if tree_mode
-                    else "↑↓ select"
-                )
-                draw_line(
-                    window,
-                    0,
-                    f" asdu  |  {navigation}  Enter brief  Backspace back  r rescan  ? help  q quit ",
-                    bold=True,
-                    invert=True,
-                )
-                breadcrumb = f"--- {group_label(name, mode)}  sort: {sort_label(sort_by)}  [f]ilter  [t]ree  [a]ction "
-                draw_line(
-                    window, 1, breadcrumb + "-" * max(0, width - len(breadcrumb) - 1)
-                )
+                location = group_label(name, mode)
+                stats = subtree_stats(tree_entries) if tree_mode else {}
                 for index, (session, branch) in enumerate(
                     display_entries[offset : offset + page_size], offset
                 ):
                     draw_session_line(
-                        window, index - offset + 3, session, index == selected, branch
+                        window,
+                        index - offset + 2,
+                        session,
+                        index == selected,
+                        branch,
+                        stats.get(row_id(session)),
+                        striped=stripes and bool(index % 2),
                     )
                 total = len(display_entries)
 
-            footer_sessions = detail[1] if detail is not None else grouped_visible
-            origins = Counter(session.origin for session in footer_sessions)
+            if detail is None and mode == "cwd":
+                display_index = {
+                    item_key(item): i
+                    for i, item in enumerate(items)
+                    if item[0] == "session"
+                }
+                links = parent_links(tree_entries) if tree_mode else {}
+                entry_children = defaultdict(list)
+                for entry in tree_entries:
+                    parent_id = links.get(row_id(entry))
+                    if parent_id in display_index:
+                        entry_children[parent_id].append(row_id(entry))
+                tree_parents = {
+                    i: display_index.get(links.get(item_key(item)))
+                    for i, item in enumerate(items)
+                }
+                tree_children = defaultdict(list)
+                for index, parent in tree_parents.items():
+                    tree_children[parent].append(index)
+
+            footer_sessions = (
+                detail[1]
+                if detail is not None
+                else [entry for entry in grouped_visible if in_scope(entry, cwd_node)]
+            )
             footer = (
                 f"Transcripts: {human_size(sum(session.size for session in footer_sessions))}  "
-                f"{len(footer_sessions):,} sessions  "
-                f"main {origins['primary']}  child {origins['subagent']}  user {origins['user']}  review {origins['review']}  ide {origins['ide']}"
+                f"{len(footer_sessions):,} sessions"
             )
-            draw_line(window, height - 1, status or footer, invert=True)
+            if warning := scan_notice():
+                footer += "  " + warning
+            label = f" asdu  {location}"
+            if source_filter != "all":
+                label += f"  [{source_filter}]"
+            ordering = ("tree " if tree_mode else "") + sort_label(sort_by) + " "
+            available = max(0, width - 1 - display_width(ordering))
+            draw_line(
+                window,
+                0,
+                pad_display(compact_text(label, available), available) + ordering,
+                bold=True,
+                invert=True,
+            )
+            selected_session = detail is not None or (
+                bool(items) and items[selected][0] == "session"
+            )
+            has_sessions = detail is not None or any(
+                kind == "session" for kind, _, _ in items
+            )
+            commands = ["Enter open"]
+            if detail is not None or (mode == "cwd" and cwd_node != cwd_root):
+                commands.append("Backspace back")
+            if detail is None:
+                commands.append("g group")
+            commands.extend(["f filter", "s sort"])
+            if has_sessions:
+                commands.append("t tree")
+            if selected_session:
+                commands.append("a action")
+            commands.append("? help")
+            draw_line(window, height - 2, " " + (status or footer))
+            draw_line(window, height - 1, " " + "  ".join(commands), invert=True)
 
             window.refresh()
             siblings = (
-                tree_children.get(tree_parents.get(selected), [])
-                if detail and tree_mode
-                else []
+                tree_children.get(tree_parents.get(selected), []) if tree_mode else []
             )
             first = selected == (siblings[0] if siblings else 0)
             last = selected == (siblings[-1] if siblings else max(0, total - 1))
@@ -2206,6 +2567,18 @@ def tui(
             )
             if key == -1:
                 continue
+            selected_entry = (
+                display_entries[selected][0]
+                if detail is not None and display_entries
+                else items[selected][2][0]
+                if detail is None and items and items[selected][0] == "session"
+                else None
+            )
+            if detail is None and mode == "cwd" and selected_entry is None:
+                if key in (curses.KEY_RIGHT, ord("l")):
+                    key = 10
+                elif key in (curses.KEY_LEFT, ord("h")):
+                    key = 127
             status = ""
             if key in (ord("/"), ord("n"), ord("N")):
                 if key == ord("/"):
@@ -2239,12 +2612,14 @@ def tui(
                 text_view(
                     window,
                     "Help",
-                    "Sizes: transcript bytes associated with a CWD, not project files.\n"
+                    "Sizes: saved conversation bytes, not project files. Updated: file modification time.\n"
                     "Tag groups: primary tag only; briefs list every matching tag.\n\n"
-                    "Enter: open folder or session brief\n/: find text; n/N: next/previous match\nHome/End: first/last\nBackspace: parent folder or previous list\nr: rescan local session roots\nf: choose source\ns: choose sort\ng: switch tag/CWD grouping\nt: toggle session tree (↑↓ siblings, ←→ parent/child, Space fold, z all)\na: archive or move selected session to Trash\ni: open a session brief\nq: quit",
+                    "Enter: open folder or session brief\n/: find text; n/N: next/previous match\nHome/End: first/last\nBackspace: parent folder or previous list\nr: rescan local session roots\nf: filter by source\ns: choose sort\ng: group by folder, tag, source, or session type\nt: toggle session tree (↑↓ siblings, ←→ parent/child, Space fold, z all)\na: archive or move selected session to Trash\ni: open a session brief\nq: quit",
                 )
                 continue
             if key == ord("r"):
+                if detail is None and items:
+                    pending_anchor = item_key(items[selected])
 
                 def show_rescan(
                     source: str,
@@ -2255,31 +2630,18 @@ def tui(
                 ) -> None:
                     window.erase()
                     _, progress_width = window.getmaxyx()
-                    percent = (
-                        int(done_bytes * 100 / total_bytes)
-                        if total_bytes
-                        else int(current * 100 / max(1, total))
+                    progress_height, _ = window.getmaxyx()
+                    lines = indexing_lines(
+                        min(progress_width - 1, 31)
+                        if progress_height < 12
+                        else progress_width - 1,
+                        source,
+                        current,
+                        done_bytes,
+                        total_bytes,
                     )
-                    bar_width = max(8, min(32, progress_width - 28))
-                    bar = (
-                        "["
-                        + "#" * int(bar_width * percent / 100)
-                        + "-" * (bar_width - int(bar_width * percent / 100))
-                        + "]"
-                    )
-                    draw_line(
-                        window,
-                        0,
-                        " asdu  |  rescanning local sessions ",
-                        bold=True,
-                        invert=True,
-                    )
-                    draw_line(window, 2, f"  {bar}  {percent:3d}%")
-                    draw_line(
-                        window,
-                        4,
-                        f"  {source}: {current:,}/{total:,}  {human_size(done_bytes)}/{human_size(total_bytes)}",
-                    )
+                    for row, line in enumerate(lines):
+                        draw_line(window, row, line, bold=row < 5)
                     window.refresh()
 
                 window.erase()
@@ -2300,7 +2662,7 @@ def tui(
                     refresh_view()
                 continue
             if (
-                detail is not None
+                selected_entry is not None
                 and tree_mode
                 and key
                 in (
@@ -2314,7 +2676,7 @@ def tui(
                     ord("l"),
                 )
             ):
-                entry = display_entries[selected][0]
+                entry = selected_entry
                 parent = tree_parents.get(selected)
                 siblings = tree_children.get(parent, [])
                 sibling_position = (
@@ -2339,14 +2701,16 @@ def tui(
                         collapsed_nodes.add(row_id(entry))
                     elif parent is not None:
                         selected = parent
-            elif detail is not None and tree_mode and key == ord(" "):
-                entry = display_entries[selected][0]
+            elif selected_entry is not None and tree_mode and key == ord(" "):
+                entry = selected_entry
                 if entry_children.get(row_id(entry)):
                     if row_id(entry) in collapsed_nodes:
                         collapsed_nodes.remove(row_id(entry))
                     else:
                         collapsed_nodes.add(row_id(entry))
-            elif detail is not None and tree_mode and key == ord("z"):
+            elif tree_mode and key == ord("z"):
+                if detail is None and items:
+                    pending_anchor = item_key(items[selected])
                 nodes_with_children = set(entry_children)
                 if nodes_with_children.issubset(collapsed_nodes):
                     collapsed_nodes.clear()
@@ -2374,6 +2738,9 @@ def tui(
                 if choice is not None:
                     mode = choice
                     selected, offset = 0, 0
+            elif detail is None and mode == "cwd" and key == ord("t"):
+                pending_anchor = item_key(items[selected]) if items else None
+                tree_mode, collapsed_nodes = browser.toggle_tree(tree_entries)
             elif detail is not None and key == ord("t"):
                 # Build the same contextual tree used for rendering.  A
                 # parent outside this tag would otherwise be added only on
@@ -2381,8 +2748,14 @@ def tui(
                 contextual_tree = tree_with_ancestors(detail[1], grouped_visible)
                 tree_mode, collapsed_nodes = browser.toggle_tree(contextual_tree)
                 selected, offset = 0, 0
-            elif detail is not None and key == ord("a"):
-                entry = display_entries[selected][0]
+            elif key == ord("a") and (
+                detail is not None or (items and items[selected][0] == "session")
+            ):
+                entry = (
+                    display_entries[selected][0]
+                    if detail is not None
+                    else items[selected][2][0]
+                )
                 choice = confirm_session_action(window, entry)
                 if choice == "trash" and confirm_deletes:
                     confirmation = confirm_trash(window)
@@ -2410,12 +2783,14 @@ def tui(
                         status = str(error)
                     else:
                         sessions.remove(entry)
-                        if entry in detail[1]:
+                        if detail is not None and entry in detail[1]:
                             detail[1].remove(entry)
             elif key == ord("f"):
                 available = ["all", *sorted({session.source for session in sessions})]
                 choice = choose(window, "Source", available, source_filter)
                 if choice is not None:
+                    if detail is None and items:
+                        pending_anchor = item_key(items[selected])
                     source_filter = choice
                     refresh_view()
             elif detail is not None and key == ord("s"):
@@ -2423,27 +2798,36 @@ def tui(
                     window, "Sort sessions", ["size", "date", "name"], sort_by
                 )
                 if choice is not None:
+                    pending_anchor = (
+                        row_id(display_entries[selected][0])
+                        if display_entries
+                        else None
+                    )
                     sort_by = choice
             elif detail is None and key == ord("s"):
                 choice = choose(
                     window, "Sort", ["size", "date", "count", "name"], sort_by
                 )
                 if choice is not None:
+                    pending_anchor = item_key(items[selected]) if items else None
                     sort_by = choice
             elif detail is None and key in (curses.KEY_ENTER, 10, 13):
                 if mode == "cwd":
-                    items = cwd_listing(visible, cwd_node, sort_by)
-                    if cwd_node != cwd_root:
-                        items.insert(0, ("parent", "..", []))
                     if not items:
                         continue
                     kind, name, entries = items[selected]
-                    if kind == "parent":
-                        cwd_node = cwd_node.parent
-                    elif kind == "folder":
+                    if kind == "folder":
+                        folder_positions[cwd_node] = (item_key(items[selected]), offset)
                         cwd_node = cwd_node / name
+                        pending_anchor, offset = folder_positions.get(
+                            cwd_node, (None, 0)
+                        )
+                        selected = 0
+                        continue
                     else:
-                        text_view(window, entries[0].title, digest(entries[0]))
+                        open_brief(
+                            window, entries[0], tree_entries if tree_mode else visible
+                        )
                         continue
                 else:
                     items = browser_group_items(grouped_visible, mode, sort_by)
@@ -2451,7 +2835,7 @@ def tui(
                         continue
                     _, name, entries = items[selected]
                     detail = (name, entries)
-                    detail_return = (selected, offset)
+                    detail_return = (item_key(items[selected]), offset)
                     tree_entries = tree_with_ancestors(entries, grouped_visible)
                     tree_mode, collapsed_nodes = browser.open_group(
                         mode, name, source_filter, cwd_node, tree_entries
@@ -2463,16 +2847,21 @@ def tui(
                 and key in (curses.KEY_BACKSPACE, 127, 8)
             ):
                 if cwd_node != cwd_root:
+                    folder_positions[cwd_node] = (
+                        (item_key(items[selected]), offset) if items else (None, 0)
+                    )
                     cwd_node = cwd_node.parent
-                    selected, offset = 0, 0
+                    pending_anchor, offset = folder_positions.get(cwd_node, (None, 0))
+                    selected = 0
             elif detail is not None and key in (curses.KEY_BACKSPACE, 127, 8):
                 detail = None
-                selected, offset = detail_return or (0, 0)
+                pending_anchor, offset = detail_return or (None, 0)
+                selected = 0
                 detail_return = None
                 browser.close_group()
             elif detail is not None and key in (ord("i"), curses.KEY_ENTER, 10, 13):
                 entry = display_entries[selected][0]
-                text_view(window, entry.title, digest(entry))
+                open_brief(window, entry, tree_entries if tree_mode else visible)
 
     try:
         curses.wrapper(run)
@@ -2484,6 +2873,7 @@ def tui(
 
 
 def main() -> int:
+    global ASCII_UI
     parser = argparse.ArgumentParser(
         description="ncdu-style browser for local agent session storage."
     )
@@ -2495,13 +2885,16 @@ def main() -> int:
         default="browse",
     )
     parser.add_argument(
-        "--root",
+        "--codex-root",
         type=Path,
         default=Path.home() / ".codex" / "sessions",
-        help="Codex rollout root",
+        help="Codex session storage directory",
     )
     parser.add_argument(
-        "--claude-root", type=Path, default=Path.home() / ".claude" / "projects"
+        "--claude-root",
+        type=Path,
+        default=Path.home() / ".claude" / "projects",
+        help="Claude session storage directory",
     )
     parser.add_argument(
         "--source",
@@ -2523,10 +2916,13 @@ def main() -> int:
         "--config", type=Path, help="TOML tag rules; replaces the built-in rules"
     )
     parser.add_argument(
-        "--group", choices=("tag", "cwd", "source", "origin"), default="tag"
+        "--group",
+        choices=("tag", "folder", "source", "type"),
+        default="tag",
+        help="Group by folder, tag, source, or session type",
     )
     parser.add_argument(
-        "--sort", choices=("size", "date", "count", "name"), default="size"
+        "--sort", choices=("size", "updated", "count", "name"), default="size"
     )
     parser.add_argument("--tag", help="With 'sessions', show only this primary tag")
     parser.add_argument(
@@ -2542,7 +2938,7 @@ def main() -> int:
     parser.add_argument(
         "--no-progress",
         action="store_true",
-        help="Suppress the content-keyword scan progress bar",
+        help="Suppress the startup splash and scan progress",
     )
     parser.add_argument(
         "--no-content-cache",
@@ -2554,7 +2950,15 @@ def main() -> int:
         action="store_true",
         help="Ask before deletion even when confirmation was disabled",
     )
+    parser.add_argument(
+        "--ascii",
+        action="store_true",
+        help="Use plain ASCII boxes, tree markers, and ncdu-style size bars",
+    )
     args = parser.parse_args()
+    ASCII_UI = args.ascii
+    args.group = {"folder": "cwd", "type": "origin"}.get(args.group, args.group)
+    args.sort = {"updated": "date"}.get(args.sort, args.sort)
 
     if args.command == "sessions" and args.sort == "count":
         parser.error("--sort count applies to groups, not individual sessions")
@@ -2563,8 +2967,8 @@ def main() -> int:
         rules = load_tag_rules(args.config)
     except (OSError, tomllib.TOMLDecodeError, ValueError) as error:
         parser.error(str(error))
-    sources = tuple(args.source or ("codex", "claude"))
-    adapters = source_adapters(args.root, args.claude_root)
+    sources = tuple(dict.fromkeys(args.source or ("codex", "claude")))
+    adapters = source_adapters(args.codex_root, args.claude_root)
     source_roots = {source: adapter.root for source, adapter in adapters.items()}
     if args.source:
         for source in sources:
@@ -2573,17 +2977,29 @@ def main() -> int:
                     f"{source} session root does not exist: {source_roots[source]}"
                 )
     elif not any(root.exists() for root in source_roots.values()):
-        parser.error("no supported session roots found; pass --root or --claude-root")
+        parser.error(
+            "no supported session roots found; pass --codex-root or --claude-root"
+        )
     scope = None if args.all else (args.project or Path.cwd()).resolve()
+
+    scan_warning = ""
 
     def scan_current(
         show_progress: bool,
         render: Callable[[str, int, int, int, int], None] | None = None,
     ) -> list[Session]:
+        nonlocal scan_warning
         progress = ScanProgress(
             show_progress
             and (
-                render is not None or (args.content_keywords and not args.no_progress)
+                render is not None
+                or (
+                    not args.no_progress
+                    and (
+                        args.content_keywords
+                        or (args.command == "browse" and sys.stderr.isatty())
+                    )
+                )
             ),
             render,
         )
@@ -2592,10 +3008,13 @@ def main() -> int:
             sources, adapters, rules, args.content_keywords, progress, cache, scope
         )
         progress.finish()
+        scan_warning = progress.notice()
         found = [session for session in found if in_scope(session, scope)]
         return infer_tags(found) if args.config is None else found
 
     sessions = scan_current(True)
+    if scan_warning and args.command != "browse":
+        print(scan_warning, file=sys.stderr)
 
     if args.command == "summary":
         print_summary(sessions, args.group, args.sort)
@@ -2619,7 +3038,7 @@ def main() -> int:
             parser.error(
                 f"session prefix is ambiguous ({len(matches)} matches); provide more characters"
             )
-        print(digest(matches[0]))
+        print(session_brief(matches[0], sessions))
     else:
         tui(
             sessions,
@@ -2628,6 +3047,7 @@ def main() -> int:
             scope,
             args.confirm_delete or not skip_delete_confirmation(),
             lambda render: scan_current(True, render),
+            lambda: scan_warning,
         )
     return 0
 
