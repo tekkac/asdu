@@ -67,6 +67,9 @@ class Screen:
     def nodelay(self, enabled):
         self.nonblocking = enabled
 
+    def timeout(self, milliseconds):
+        self.delay = milliseconds
+
     def selected(self):
         return " ".join(
             text
@@ -90,6 +93,197 @@ def browse_screen(entries, keys, mode="cwd", sort="name", notice=lambda: ""):
 
 
 class AsduTests(unittest.TestCase):
+    def test_ctrl_c_clears_only_interactive_output(self):
+        for terminal in (True, False):
+            stream = io.StringIO()
+            with (
+                patch.object(asdu, "run_main", side_effect=KeyboardInterrupt),
+                patch.object(stream, "isatty", return_value=terminal),
+                patch.object(asdu.sys, "stderr", stream),
+                patch.object(asdu.sys, "stdout", stream),
+            ):
+                self.assertEqual(asdu.main(), 130)
+            self.assertEqual(
+                stream.getvalue(), "\x1b[0m\x1b[?25h\x1b[2J\x1b[H" if terminal else ""
+            )
+
+    def test_tui_interrupt_reaches_top_level_cleanup(self):
+        with patch.object(asdu.curses, "wrapper", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                asdu.tui([], "tag", "size", None, True, lambda _: [])
+
+    def test_interrupted_archive_preserves_original(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "session.jsonl"
+            path.write_text("fictional transcript")
+            stat = path.stat()
+            entry = asdu.replace(
+                session("demo"), path=path, size=stat.st_size, modified=stat.st_mtime
+            )
+            with (
+                patch.dict(asdu.os.environ, {"XDG_DATA_HOME": str(root)}),
+                patch.object(asdu.shutil, "copyfileobj", side_effect=KeyboardInterrupt),
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    asdu.archive_session(entry)
+            self.assertEqual(path.read_text(), "fictional transcript")
+            self.assertEqual(list(root.rglob("*.gz")), [])
+
+    def test_brief_wraps_at_120_columns_on_wide_terminals(self):
+        screen = Screen([ord("q")], width=280)
+        asdu.text_view(screen, "Long title " * 20, "│ " + "readable text " * 40)
+        for _, column, text, _ in screen.frames[0]:
+            self.assertLessEqual(column + asdu.display_width(text), 120)
+        self.assertTrue(any(len(text) > 80 for _, _, text, _ in screen.frames[0]))
+
+    def test_short_group_names_have_no_padding_ellipsis(self):
+        for mode in ("tag", "cwd"):
+            entry = asdu.replace(session("demo"), cwd="/project/folder")
+            screen = browse_screen([entry], [ord("q")], mode=mode)
+            for row, _, text, _ in screen.frames[0]:
+                if 2 <= row < screen.height - 2:
+                    self.assertNotIn("…", text)
+
+    def test_brief_reserves_right_margin(self):
+        screen = Screen([ord("q")], width=50)
+        asdu.text_view(screen, "Long title " * 12, "│ " + "readable text " * 20)
+        for _, column, text, _ in screen.frames[0]:
+            self.assertLessEqual(column + asdu.display_width(text), 46)
+
+    def test_preview_skips_large_middle_records_and_keeps_recent_content(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rollout.jsonl"
+            records = [
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "user_message",
+                        "message": "First real request",
+                    },
+                },
+                {"type": "tool_output", "text": "x" * 400_000},
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "user_message",
+                        "message": "Latest real request",
+                    },
+                },
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Recent answer"}],
+                    },
+                },
+            ]
+            path.write_text("\n".join(json.dumps(record) for record in records))
+            entry = asdu.replace(session("demo"), path=path)
+            self.assertLess(len(asdu.preview_transcript(path).getvalue()), 1024)
+            preview = asdu.digest(entry, preview=True)
+            self.assertIn("Counting activity", preview)
+            self.assertIn("Latest request (preview)", preview)
+            self.assertIn("Recent answer", preview)
+            self.assertLess(
+                preview.index("Latest request"), preview.index("First request")
+            )
+            complete = asdu.digest(entry)
+            self.assertIn("4 events", complete)
+            self.assertNotIn("(preview)", complete)
+
+    def test_live_brief_update_keeps_scroll_position(self):
+        screen = Screen([asdu.curses.KEY_DOWN, -1, ord("q")], height=8)
+        body = "Counting activity…\n" + "\n".join(f"Line {n}" for n in range(30))
+        updates = iter([body, body, body.replace("Counting activity…", "42 events")])
+        asdu.text_view(screen, "Title", body, update=lambda: next(updates))
+        self.assertEqual(screen.frames[1][1][2], "Line 0")
+        self.assertEqual(screen.frames[2][1][2], "Line 0")
+
+    def test_terminal_background_detection_and_input_preservation(self):
+        class Terminal(Screen):
+            def keypad(self, enabled):
+                self.keypad_enabled = enabled
+
+            def timeout(self, milliseconds):
+                self.delay = milliseconds
+
+        for reply, expected in (
+            ("\x1b]11;rgb:0000/0000/0000\x07", 233),
+            ("\x1b]11;rgb:ff/ff/ff\x1b\\", 255),
+            ("", None),
+            ("\x1b]11;rgb:broken", None),
+        ):
+            screen = Terminal([ord(c) for c in "x" + reply] + [-1])
+            with (
+                patch.object(asdu.sys, "stdout", io.StringIO()),
+                patch.object(asdu.curses, "ungetch") as replay,
+            ):
+                self.assertEqual(asdu.stripe_background(screen, "auto"), expected)
+                replay.assert_called_once_with(ord("x"))
+            self.assertEqual(screen.delay, -1)
+            self.assertTrue(screen.keypad_enabled)
+        self.assertEqual(asdu.stripe_background(None, "dark"), 235)
+        self.assertEqual(asdu.stripe_background(None, "light"), 254)
+
+    def test_wide_titles_and_dates_before_tree_branches(self):
+        title = ("Investigate " + "mathematical structure " * 20).strip()
+        entry = asdu.replace(session("demo"), title=asdu.untitled_title(title))
+        self.assertEqual(asdu.session_label(entry), title.strip())
+        for width in (80, 280):
+            screen = Screen([], width=width)
+            asdu.draw_session_line(screen, 2, entry, True, "├─ ")
+            text = screen.frame[-1][2]
+            self.assertLess(text.index(asdu.session_date(entry)), text.index("├─"))
+            self.assertLess(text.index("├─"), text.index("Investigate"))
+            self.assertTrue(text.rstrip().endswith("…"))
+            self.assertTrue(text.endswith(" " * asdu.CONTENT_RIGHT_MARGIN))
+            self.assertEqual(asdu.display_width(text), width - 1)
+            if width == 280:
+                self.assertGreater(text.index("…") - text.index("Investigate"), 90)
+
+    def test_native_fallback_titles_survive_discovery(self):
+        title = "Please investigate " + "a synthetic example " * 12
+        for source in ("codex", "claude"):
+            with (
+                self.subTest(source=source),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                records = (
+                    [
+                        {
+                            "type": "session_meta",
+                            "payload": {"id": "demo", "cwd": "/project"},
+                        },
+                        {
+                            "type": "event_msg",
+                            "payload": {"type": "user_message", "message": title},
+                        },
+                    ]
+                    if source == "codex"
+                    else [
+                        {
+                            "type": "user",
+                            "sessionId": "demo",
+                            "cwd": "/project",
+                            "message": {"role": "user", "content": title},
+                        }
+                    ]
+                )
+                (root / "rollout-demo.jsonl").write_text(
+                    "\n".join(json.dumps(record) for record in records)
+                )
+                entries = getattr(asdu, f"scan_{source}")(
+                    root,
+                    [],
+                    False,
+                    asdu.ScanProgress(False),
+                    asdu.ContentCache(False),
+                    None,
+                )
+                self.assertEqual(asdu.session_label(entries[0]), title.strip())
+
     def test_selection_pointer_preserves_columns_and_ascii_fallback(self):
         for ascii_mode, marker in ((False, "›"), (True, ">")):
             with patch.object(asdu, "ascii_ui", return_value=ascii_mode):
@@ -121,6 +315,9 @@ class AsduTests(unittest.TestCase):
         self.assertEqual(len(screen.frame[0][2]), screen.width - 1)
         self.assertEqual(screen.frame[2][3], (23 << 8) | asdu.curses.A_BOLD)
         self.assertEqual(screen.frame[3][3], 18 << 8)
+        self.assertEqual(screen.frame[4][3], 16 << 8)
+        self.assertIn(asdu.session_date(session("demo")), screen.frame[4][2])
+        self.assertEqual(screen.frame[5][3], 18 << 8)
 
     def test_scan_reports_skips_without_counting_out_of_scope_sessions(self):
         for source in ("codex", "claude"):
@@ -206,8 +403,12 @@ class AsduTests(unittest.TestCase):
     def test_brief_draws_before_loading_and_can_cancel(self):
         for cancel in (False, True):
             screen = Screen([])
+            started = asdu.threading.Event()
+            release = asdu.threading.Event()
+            finished = asdu.threading.Event()
+            polls = []
 
-            def load(entry, poll):
+            def load(entry, poll, preview):
                 self.assertEqual(len(screen.frames), 1)
                 self.assertTrue(
                     any(
@@ -220,17 +421,31 @@ class AsduTests(unittest.TestCase):
                         "Folder: /project" in text for _, _, text, _ in screen.frames[0]
                     )
                 )
-                if cancel:
-                    with patch.object(screen, "getch", return_value=127):
-                        poll()
-                return "completed brief"
+                polls.append(poll)
+                started.set()
+                release.wait(2)
+                try:
+                    poll()
+                    return "preview" if preview else "completed brief"
+                finally:
+                    finished.set()
+
+            def view(window, title, body, update):
+                self.assertTrue(started.wait(2))
+                self.assertIn("Folder: /project", body)
+                if not cancel:
+                    release.set()
+                    self.assertTrue(finished.wait(2))
 
             with (
                 patch.object(asdu, "digest", side_effect=load),
-                patch.object(asdu, "text_view") as view,
+                patch.object(asdu, "text_view", side_effect=view),
             ):
                 asdu.open_brief(screen, session("demo"), [session("demo")])
-                self.assertEqual(view.call_count, 0 if cancel else 1)
+                release.set()
+                self.assertTrue(finished.wait(2))
+                with self.assertRaises(asdu.BriefCancelled):
+                    polls[0]()
             self.assertFalse(screen.nonblocking)
 
     def test_digest_scan_polls_for_cancellation(self):
@@ -293,15 +508,18 @@ class AsduTests(unittest.TestCase):
                 any("< Back" in text for _, _, text, _ in screen.frames[-1])
             )
 
-    def test_two_box_indexing_layout(self):
-        for width in (0, 15, 31, 32, 80):
+    def test_centered_wordmark_indexing_layout(self):
+        for width in (0, 15, 31, 47, 48, 80, 240):
             lines = asdu.indexing_lines(width, "codex", 342, 1200, 2400)
             self.assertTrue(all(asdu.display_width(line) <= width for line in lines))
-            if width >= 32:
-                self.assertEqual(len(lines), 11)
-                self.assertTrue(all(asdu.display_width(line) == 32 for line in lines))
-                self.assertIn("50%", lines[8])
-                self.assertIn("342 sessions", lines[7])
+            if width >= 48:
+                self.assertEqual(len(lines), 14)
+                self.assertTrue(all(asdu.display_width(line) == 48 for line in lines))
+                self.assertIn("50%", lines[11])
+                self.assertIn("342 sessions", lines[12])
+                top, left = asdu.splash_position(width, 30, lines)
+                self.assertEqual(top, 8)
+                self.assertLessEqual(abs(left - (width - 48 - left)), 1)
             else:
                 self.assertEqual(len(lines), 1)
 
@@ -312,8 +530,8 @@ class AsduTests(unittest.TestCase):
             self.assertTrue(all(line.isascii() for line in asdu.splash_lines(80)))
             self.assertEqual(asdu.terminal_art("├─ ▸ child ↓"), "+- > child v")
         lines = asdu.splash_lines(80)
-        self.assertEqual(len(lines), 5)
-        self.assertTrue(all(asdu.display_width(line) == 32 for line in lines))
+        self.assertEqual(len(lines), 8)
+        self.assertTrue(all(asdu.display_width(line) == 48 for line in lines))
         self.assertNotIn("░", "".join(lines))
 
     def test_tree_sizes_include_descendants_once_and_ignore_folds(self):
@@ -327,9 +545,7 @@ class AsduTests(unittest.TestCase):
         self.assertEqual(stats[asdu.row_id(child)], (25, 1))
         self.assertEqual(asdu.session_tree(entries, "size")[0][0], parent)
         with patch.object(asdu, "digest", return_value="brief"):
-            self.assertIn(
-                "File: 100 B\nTree: 125 B", asdu.session_brief(parent, entries)
-            )
+            self.assertIn("Tree: 125 B", asdu.session_brief(parent, entries))
         for keys in ([ord("t"), ord("q")], [ord("t"), ord("z"), ord("q")]):
             screen = browse_screen(entries, keys, sort="size")
             frame = screen.frames[-1]
@@ -1122,7 +1338,7 @@ class AsduTests(unittest.TestCase):
             self.assertIn("first useful request", brief)
             self.assertIn("latest useful request", brief)
             self.assertIn("latest reply", brief)
-            self.assertIn("├ Last reply\n│ latest reply\n╰", brief)
+            self.assertIn("├ Last reply\n│ latest reply\n│", brief)
             self.assertIn("Resume: codex resume test", brief)
             self.assertTrue(brief.rstrip().endswith("Resume: codex resume test"))
 

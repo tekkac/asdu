@@ -16,12 +16,14 @@ import curses
 import gzip
 import json
 import math
+import io
 import os
 import re
 import shlex
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import tomllib
 import unicodedata
@@ -33,6 +35,7 @@ from typing import Callable, Iterable
 
 
 ASCII_UI = False
+CONTENT_RIGHT_MARGIN = 3
 
 DEFAULT_TAGS = [
     {
@@ -128,14 +131,24 @@ class ScanProgress:
 
     def paint(self, source: str, current: int, done: int, total: int) -> None:
         try:
-            width = os.get_terminal_size(sys.stderr.fileno()).columns - 1
+            terminal = os.get_terminal_size(sys.stderr.fileno())
+            width, height = terminal.columns - 1, terminal.lines
         except OSError:
-            width = 79
-        lines = indexing_lines(width, source, current, done, total)
+            width, height = 79, 24
+        lines = indexing_lines(
+            min(width, 47) if height < 15 else width, source, current, done, total
+        )
+        top, left = splash_position(width, height, lines)
+        lines = [""] * top + [" " * left + line for line in lines]
         if lines == self.last_frame:
             return
-        prefix = f"\033[{self.frame_rows}A" if self.frame_rows else ""
-        sys.stderr.write(prefix + "\r\033[J\033[1m" + "\n".join(lines) + "\033[0m\n")
+        styled = [
+            f"\033[1m{line}\033[0m"
+            if top <= row < top + 6 and height >= 15 and width >= 48
+            else line
+            for row, line in enumerate(lines)
+        ]
+        sys.stderr.write("\033[H\033[J" + "\n".join(styled) + "\n")
         sys.stderr.flush()
         self.frame_rows = len(lines)
         self.last_frame = lines
@@ -342,44 +355,60 @@ def progress_bar(percent: int, width: int) -> str:
 
 
 def splash_lines(width: int) -> list[str]:
-    if width < 32:
+    if width < 48:
         return []
-    return [
-        terminal_art(line)
-        for line in (
-            "╭──────────────────────────────╮",
-            "│    __ _  ___  __| | _  _     │",
-            "│   / _\x60 |(_-< / _\x60 || || |    │",
-            "╰───\\__,_|/__/ \\__,_| \\_,_|────╯",
-            "    agent session disk usage    ",
+    logo = (
+        (
+            " █████╗ ███████╗██████╗ ██╗   ██╗",
+            "██╔══██╗██╔════╝██╔══██╗██║   ██║",
+            "███████║███████╗██║  ██║██║   ██║",
+            "██╔══██║╚════██║██║  ██║██║   ██║",
+            "██║  ██║███████║██████╔╝╚██████╔╝",
+            "╚═╝  ╚═╝╚══════╝╚═════╝  ╚═════╝",
         )
+        if not ascii_ui()
+        else (
+            "",
+            "     _   ___ ___  _   _",
+            "    /_\\ / __|   \\| | | |",
+            "   / _ \\__ \\ |) | |_| |",
+            "  /_/ \\_\\___/___/ \\___/",
+            "",
+        )
+    )
+    logo_width = max(map(display_width, logo))
+    left = " " * ((48 - logo_width) // 2)
+    return [pad_display(left + line, 48) for line in logo] + [
+        " " * 48,
+        "agent session disk usage".center(48),
     ]
+
+
+def splash_position(width: int, height: int, lines: list[str]) -> tuple[int, int]:
+    return max(0, (height - len(lines)) // 2), max(
+        0, (width - max(map(display_width, lines), default=0)) // 2
+    )
 
 
 def indexing_lines(
     width: int, source: str, current: int, done: int, total: int
 ) -> list[str]:
     percent = min(100, max(0, done * 100 // total)) if total else 0
-    if width < 32:
+    if width < 48:
         return [compact_text(f"indexing {source.lower()} {percent}%", max(0, width))]
     count = f"{current:,} sessions"
-    status = source.lower() or "discovering"
+    status = f"Indexing {source}" if source else "Discovering sessions"
     row = lambda text: terminal_art(
-        "│ " + pad_display(compact_text(text, 28), 28) + " │"
+        "│ " + pad_display(compact_text(text, 44), 44) + " │"
     )
     return [
         *splash_lines(width),
-        " " * 32,
-        terminal_art("╭─ indexing ───────────────────╮"),
-        row(
-            pad_display(
-                compact_text(status, max(0, 27 - len(count))), max(0, 28 - len(count))
-            )
-            + count
-        ),
-        row(f"{progress_bar(percent, 20)}  {percent:3d}%"),
-        row(f"{human_size(done)} / {human_size(total)}"),
-        terminal_art("╰──────────────────────────────╯"),
+        " " * 48,
+        terminal_art("╭" + "─" * 46 + "╮"),
+        row(status),
+        row(f"{size_bar(percent, 100, 36 if ascii_ui() else 38)}  {percent:3d}%"),
+        row(pad_display(count, max(0, 44 - len(human_size(done)))) + human_size(done)),
+        terminal_art("╰" + "─" * 46 + "╯"),
     ]
 
 
@@ -584,7 +613,7 @@ def derive_title(path: Path) -> str:
         for text in user_texts("codex", item):
             title = substantive_user_text(text)
             if title:
-                return title[:90]
+                return title
         payload = item.get("payload")
         if (
             item.get("type") == "response_item"
@@ -601,7 +630,7 @@ def untitled_title(first_request: str) -> str:
     """Label a generated preview without pretending the session was titled."""
     if first_request == "untitled":
         return first_request
-    return f"untitled — {first_request}"[:90]
+    return f"untitled — {compact_text(first_request, 1024)}"
 
 
 def content_text(content: object) -> str:
@@ -661,14 +690,33 @@ def substantive_user_text(text: str) -> str:
     return clean if is_real_user_text(clean) else ""
 
 
-def digest(session: Session, poll: Callable[[], None] | None = None) -> str:
+def digest(
+    session: Session, poll: Callable[[], None] | None = None, preview: bool = False
+) -> str:
     try:
-        return read_digest(session, poll)
+        return read_digest(session, poll, preview)
     except OSError as error:
         return f"Transcript unavailable: {error.strerror or error}. Press r in the list to rescan."
 
 
-def read_digest(session: Session, poll: Callable[[], None] | None = None) -> str:
+def preview_transcript(path: Path) -> io.StringIO:
+    """Sample complete records at both ends; never read an unbounded JSONL line."""
+    limit = 128 * 1024
+    with path.open("rb") as handle:
+        size = handle.seek(0, os.SEEK_END)
+        handle.seek(0)
+        head = handle.read(limit)
+        if size <= limit:
+            return io.StringIO(head.decode("utf-8", "replace"))
+        head = head.rsplit(b"\n", 1)[0] if b"\n" in head else b""
+        handle.seek(max(limit, size - limit))
+        tail = handle.read(limit).split(b"\n", 1)[1:]
+    return io.StringIO((head + b"\n" + b"".join(tail)).decode("utf-8", "replace"))
+
+
+def read_digest(
+    session: Session, poll: Callable[[], None] | None = None, preview: bool = False
+) -> str:
     """Create a compact plain-text brief without calling a model."""
     first_user: str | None = None
     latest_user: str | None = None
@@ -690,7 +738,11 @@ def read_digest(session: Session, poll: Callable[[], None] | None = None) -> str
         if text:
             latest_reply = text
 
-    with session.path.open(encoding="utf-8", errors="replace") as handle:
+    with (
+        preview_transcript(session.path)
+        if preview
+        else session.path.open(encoding="utf-8", errors="replace")
+    ) as handle:
         for index, line in enumerate(handle):
             if poll is not None and index % 128 == 0:
                 poll()
@@ -772,7 +824,9 @@ def read_digest(session: Session, poll: Callable[[], None] | None = None) -> str
 
     def excerpts(items: list[str], limit: int, prefix: str) -> list[str]:
         chosen = items[:limit] if limit > 0 else items
-        return [f"{prefix}{item[:500]}" for item in chosen] or [f"{prefix}none found"]
+        return [f"{prefix}{compact_text(item, 320)}" for item in chosen] or [
+            f"{prefix}none found"
+        ]
 
     events = sum(event_counts.values())
     turns = event_counts["turn_context"]
@@ -796,23 +850,26 @@ def read_digest(session: Session, poll: Callable[[], None] | None = None) -> str
         # that this was created using a conversation-fork operation.
         metadata.append(f"Parent session: {session.parent_id}")
     resume = resume_command(session)
+    sample = " (preview)" if preview else ""
     lines = [
-        f"{activity} across {events:,} events; {compactions:,} compactions.",
-        f"ID: {session.session_id}",
-        f"Session type: {origin_label(session.origin)}",
-        *metadata,
+        f"{human_size(session.size)}  {session.source} {origin_label(session.origin)}  {session_date(session)}",
+        f"Folder: {session.cwd}",
+        "Counting activity…"
+        if preview
+        else f"{activity} across {events:,} events; {compactions:,} compactions.",
         "",
-        f"╭ {initial_label}",
-        *excerpts(initial, 0, "│ "),
-        "",
-        "├ Latest request",
+        f"╭ Latest request{sample}",
         *excerpts([latest_user] if latest_user else [], 0, "│ "),
-        "",
-        "├ Last reply",
+        "│",
+        f"├ Last reply{sample}",
         *excerpts([latest_reply] if latest_reply else [], 0, "│ "),
+        "│",
+        f"├ {initial_label}{sample}",
+        *excerpts(initial, 0, "│ "),
         "╰",
         "",
-        f"Folder: {session.cwd}",
+        f"ID: {session.session_id}",
+        *metadata,
         f"Tags: {', '.join(session.tags)}",
         *([f"Resume: {resume}"] if resume else []),
     ]
@@ -1230,7 +1287,7 @@ def scan_claude(
             if candidate:
                 clean = substantive_user_text(candidate)
                 if clean:
-                    title = clean[:90]
+                    title = clean
             if cwd != "(unknown)" and session_id != path.stem and title != "untitled":
                 break
         if not recognized and cwd == "(unknown)":
@@ -1470,6 +1527,51 @@ def print_sessions(sessions: list[Session], sort_by: str) -> None:
         )
 
 
+def stripe_background(window: curses.window, theme: str) -> int | None:
+    """Query OSC 11 once; leave unknown backgrounds alone rather than guessing."""
+    if theme != "auto":
+        return 235 if theme == "dark" else 254
+    response = ""
+    match = None
+    deadline = time.monotonic() + 0.25
+    window.keypad(False)
+    try:
+        sys.stdout.write("\x1b]11;?\x07")
+        sys.stdout.flush()
+        while time.monotonic() < deadline and len(response) < 128:
+            window.timeout(max(1, int((deadline - time.monotonic()) * 1000)))
+            key = window.getch()
+            if key == -1:
+                break
+            response += chr(key)
+            match = re.search(
+                r"\x1b\]11;rgb:([0-9a-fA-F]{1,4})/([0-9a-fA-F]{1,4})/"
+                r"([0-9a-fA-F]{1,4})(?:\x07|\x1b\\)",
+                response,
+            )
+            if match:
+                break
+    finally:
+        window.timeout(-1)
+        window.keypad(True)
+        # Preserve user input, but never replay a partial terminal reply as keys.
+        pending = (
+            response[: match.start()] + response[match.end() :]
+            if match
+            else response.split("\x1b]11;", 1)[0]
+        )
+        for character in reversed(pending):
+            curses.ungetch(ord(character))
+    if match is None:
+        return None
+    rgb = [int(value, 16) * 255 / (16 ** len(value) - 1) for value in match.groups()]
+    brightness = sum(
+        value * weight for value, weight in zip(rgb, (0.2126, 0.7152, 0.0722))
+    )
+    shade = brightness + 20 if brightness < 128 else brightness - 20
+    return 232 + max(0, min(23, round((shade - 8) / 10)))
+
+
 def draw_line(
     window: curses.window,
     row: int,
@@ -1480,13 +1582,14 @@ def draw_line(
     invert: bool = False,
     striped: bool = False,
     pointer: bool = False,
+    right_margin: int = 0,
 ) -> None:
     height, width = window.getmaxyx()
     if row >= height or width < 2:
         return
     if selected and pointer:
         text = "›" + text[1:]
-    text = compact_text(terminal_art(text), width - 1)
+    text = compact_text(terminal_art(text), max(0, width - 1 - right_margin))
     if invert or selected or striped:
         text = pad_display(text, width - 1)
     attr = (
@@ -1545,27 +1648,43 @@ def draw_session_line(
     size, descendants = stats if stats is not None else (session.size, 0)
     prefix = f"  {human_size(size):>10}  "
     source = f"{session.source:<6}"
-    kind = f"  {origin_label(session.origin):<6}  {terminal_art(branch)}"
-    date = f"  {session_date(session):>8}"
-    title_width = max(0, width - 1 - display_width(prefix + source + kind + date))
+    kind = f"  {origin_label(session.origin):<6}"
+    date = f"  {session_date(session):>8}  "
+    branch = terminal_art(branch)
+    title_width = max(
+        0,
+        width
+        - 1
+        - CONTENT_RIGHT_MARGIN
+        - display_width(prefix + source + kind + date + branch),
+    )
     count = f" (+{descendants})" if descendants else ""
     title = pad_display(
         compact_text(session_label(session), max(0, title_width - len(count))) + count,
         title_width,
     )
-    suffix = kind + title + date
+    suffix = kind + date + branch + title
     if selected:
-        draw_line(window, row, prefix + source + suffix, selected=True, pointer=True)
+        draw_line(
+            window,
+            row,
+            prefix + source + suffix,
+            selected=True,
+            pointer=True,
+            right_margin=CONTENT_RIGHT_MARGIN,
+        )
         return
     _, width = window.getmaxyx()
-    limit = max(0, width - 1)
+    limit = max(0, width - 1 - CONTENT_RIGHT_MARGIN)
     if striped:
         draw_line(window, row, "", striped=True)
     column = 0
-    for text, color in (
-        (prefix, 0),
-        (source, source_color(session.source)),
-        (suffix, origin_color(session.origin)),
+    for text, color, style in (
+        (prefix, 0, 0),
+        (source, source_color(session.source), curses.A_BOLD),
+        (kind, origin_color(session.origin), 0),
+        (date, 0, 0),
+        (branch + title, origin_color(session.origin), 0),
     ):
         if column >= limit:
             break
@@ -1576,8 +1695,7 @@ def draw_session_line(
             if color
             else curses.A_NORMAL
         )
-        if text == source:
-            attr |= curses.A_BOLD
+        attr |= style
         text = compact_text(text, limit - column)
         window.addnstr(row, column, text, len(text), attr)
         column += display_width(text)
@@ -1631,9 +1749,10 @@ def archive_session(session: Session) -> Path:
         require_unchanged(session)
         session.path.unlink()
         return destination
-    except OSError:
+    except (OSError, KeyboardInterrupt):
         try:
-            destination.unlink(missing_ok=True)
+            if session.path.exists():
+                destination.unlink(missing_ok=True)
         except OSError:
             pass
         raise
@@ -1820,7 +1939,8 @@ def brief_sizes(session: Session, entries: Iterable[Session]) -> str:
 
 
 def session_brief(session: Session, entries: Iterable[Session]) -> str:
-    return brief_sizes(session, entries) + "\n\n" + digest(session)
+    tree = brief_sizes(session, entries).splitlines()[1:]
+    return digest(session) + ("\n" + "\n".join(tree) if tree else "")
 
 
 class BriefCancelled(Exception):
@@ -1830,7 +1950,7 @@ class BriefCancelled(Exception):
 def open_brief(
     window: curses.window, session: Session, entries: Iterable[Session]
 ) -> None:
-    """Draw known metadata first; poll for cancellation during the full scan."""
+    """Display a bounded preview, then full results; only the UI thread draws."""
     sizes = brief_sizes(session, entries)
     known = [sizes, f"ID: {session.session_id}", f"Folder: {session.cwd}"]
     if session.task_path:
@@ -1843,23 +1963,38 @@ def open_brief(
     draw_line(window, 0, session_label(session), bold=True)
     draw_line(window, 1, "Reading conversation…  Backspace return")
     for row, line in enumerate("\n".join(known).splitlines(), 3):
-        draw_line(window, row, line)
+        draw_line(window, row, line, right_margin=CONTENT_RIGHT_MARGIN)
     window.refresh()
 
+    cancelled = threading.Event()
+    updates: list[str] = []
+
     def poll() -> None:
-        if window.getch() in (127, 8, curses.KEY_BACKSPACE, 27, ord("q"), 10, 13):
+        if cancelled.is_set():
             raise BriefCancelled
 
-    window.nodelay(True)
+    def load() -> None:
+        try:
+            for preview in (True, False):
+                poll()
+                body = digest(session, poll, preview)
+                tree = sizes.splitlines()[1:]
+                updates.append(body + ("\n" + "\n".join(tree) if tree else ""))
+        except BriefCancelled:
+            pass
+
+    worker = threading.Thread(target=load, daemon=True)
+    worker.start()
     try:
-        poll()
-        body = digest(session, poll)
-        poll()
-    except BriefCancelled:
-        return
+        text_view(
+            window,
+            session_label(session),
+            "\n".join(known),
+            update=lambda: updates[-1] if updates else None,
+        )
     finally:
+        cancelled.set()
         window.nodelay(False)
-    text_view(window, session_label(session), sizes + "\n\n" + body)
 
 
 def session_tree(
@@ -2093,25 +2228,49 @@ def wrap_cells(raw: str, width: int) -> list[str]:
     return lines + [line]
 
 
-def text_view(window: curses.window, title: str, body: str) -> None:
+def text_view(
+    window: curses.window,
+    title: str,
+    body: str,
+    update: Callable[[], str | None] | None = None,
+) -> None:
     """Scrollable pane for a selected session's structural summary."""
     offset = 0
     query = ""
     match_index = -1
+    last_frame = None
     while True:
-        window.erase()
+        if update and (new_body := update()) is not None:
+            body = new_body
         height, width = window.getmaxyx()
         lines: list[str] = []
         for raw in body.splitlines():
-            lines.extend(wrap_cells(raw, max(1, width - 1)))
-        offset = min(offset, max(0, len(lines) - max(1, height - 2)))
-        draw_line(window, 0, title, bold=True)
-        for row, line in enumerate(lines[offset : offset + height - 2], 2):
-            draw_line(
-                window, row, terminal_art(line), bold=line.startswith(("╭ ", "├ ", "╰"))
+            lines.extend(
+                wrap_cells(raw, max(1, min(120, width - 1 - CONTENT_RIGHT_MARGIN)))
             )
-        window.refresh()
+        offset = min(offset, max(0, len(lines) - max(1, height - 2)))
+        frame = (body, offset, height, width)
+        if update is None or frame != last_frame:
+            window.erase()
+            draw_line(
+                window,
+                0,
+                compact_text(title, 120),
+                bold=True,
+                right_margin=CONTENT_RIGHT_MARGIN,
+            )
+            for row, line in enumerate(lines[offset : offset + height - 2], 2):
+                draw_line(
+                    window,
+                    row,
+                    terminal_art(line),
+                    bold=line.startswith(("╭ ", "├ ", "╰")),
+                )
+            window.refresh()
+            last_frame = frame
         maximum = max(0, len(lines) - max(1, height - 2))
+        if update:
+            window.timeout(100)
         key = read_navigation(window, offset == 0, offset >= maximum)
         offset, key = drain_navigation(window, key, offset, range(maximum + 1))
         if key == -1:
@@ -2212,6 +2371,7 @@ def tui(
     ask_before_delete: bool,
     rescan: Callable[[Callable[[str, int, int, int, int], None]], list[Session]],
     scan_notice: Callable[[], str] = lambda: "",
+    theme: str = "auto",
 ) -> None:
     """A small ncdu-like drill-down UI with explicit archive/Trash actions."""
 
@@ -2243,11 +2403,13 @@ def tui(
                 curses.init_pair(8, curses.COLOR_YELLOW, -1)
             if curses.COLORS >= 256 and curses.COLOR_PAIRS > 24:
                 try:
-                    for color in range(9):
-                        foreground, _ = curses.pair_content(color)
-                        curses.init_pair(color + 16, foreground, 235)
-                    stripes = True
-                except curses.error:
+                    background = stripe_background(window, theme)
+                    if background is not None:
+                        for color in range(9):
+                            foreground, _ = curses.pair_content(color)
+                            curses.init_pair(color + 16, foreground, background)
+                        stripes = True
+                except (curses.error, OSError):
                     pass
         mode, sort_by, selected, detail, source_filter, tree_mode = (
             initial_mode,
@@ -2416,9 +2578,7 @@ def tui(
                         )
                         continue
                     else:
-                        name_width = max(1, width - 24 - len(size_bar(0, 1)))
-                        display = compact_text(display_name, name_width)
-                        text = f"{human_size(group_size):>10}  {size_bar(group_size, largest_group)}  {len(entries):>5}  {pad_display(display, name_width)}"
+                        text = f"{human_size(group_size):>10}  {size_bar(group_size, largest_group)}  {len(entries):>5}  {display_name}"
                         color = origin_color(name) if mode == "origin" else 0
                     draw_line(
                         window,
@@ -2428,6 +2588,7 @@ def tui(
                         color,
                         striped=stripes and bool(index % 2),
                         pointer=True,
+                        right_margin=CONTENT_RIGHT_MARGIN,
                     )
                 total = len(items)
             else:
@@ -2632,16 +2793,24 @@ def tui(
                     _, progress_width = window.getmaxyx()
                     progress_height, _ = window.getmaxyx()
                     lines = indexing_lines(
-                        min(progress_width - 1, 31)
-                        if progress_height < 12
+                        min(progress_width - 1, 47)
+                        if progress_height < 15
                         else progress_width - 1,
                         source,
                         current,
                         done_bytes,
                         total_bytes,
                     )
+                    top, left = splash_position(
+                        progress_width - 1, progress_height, lines
+                    )
                     for row, line in enumerate(lines):
-                        draw_line(window, row, line, bold=row < 5)
+                        draw_line(
+                            window,
+                            top + row,
+                            " " * left + line,
+                            bold=row < 6 and len(lines) > 1,
+                        )
                     window.refresh()
 
                 window.erase()
@@ -2865,7 +3034,7 @@ def tui(
 
     try:
         curses.wrapper(run)
-    except (KeyboardInterrupt, curses.error):
+    except curses.error:
         # wrapper restores cooked mode before control reaches the shell.  A
         # terminal can emit a partial escape sequence during touchpad/mouse
         # tracking or resize; treat it like a quiet quit rather than a trace.
@@ -2873,11 +3042,23 @@ def tui(
 
 
 def main() -> int:
+    try:
+        return run_main()
+    except KeyboardInterrupt:
+        # curses.wrapper has already restored terminal modes at this point.
+        stream = sys.stderr if sys.stderr.isatty() else sys.stdout
+        if stream.isatty():
+            stream.write("\033[0m\033[?25h\033[2J\033[H")
+            stream.flush()
+        return 130
+
+
+def run_main() -> int:
     global ASCII_UI
     parser = argparse.ArgumentParser(
         description="ncdu-style browser for local agent session storage."
     )
-    parser.add_argument("--version", action="version", version="asdu 0.1.0")
+    parser.add_argument("--version", action="version", version="asdu 0.1.1")
     parser.add_argument(
         "command",
         nargs="?",
@@ -2954,6 +3135,12 @@ def main() -> int:
         "--ascii",
         action="store_true",
         help="Use plain ASCII boxes, tree markers, and ncdu-style size bars",
+    )
+    parser.add_argument(
+        "--theme",
+        choices=("auto", "dark", "light"),
+        default="auto",
+        help="Stripe background theme (default: detect terminal background)",
     )
     args = parser.parse_args()
     ASCII_UI = args.ascii
@@ -3048,6 +3235,7 @@ def main() -> int:
             args.confirm_delete or not skip_delete_confirmation(),
             lambda render: scan_current(True, render),
             lambda: scan_warning,
+            args.theme,
         )
     return 0
 

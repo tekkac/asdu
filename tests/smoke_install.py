@@ -1,6 +1,7 @@
 """Linux wheel smoke test. Run via tests/Dockerfile; uses disposable data only."""
 
 import gzip
+from importlib.metadata import version
 import os
 from pathlib import Path
 import shutil
@@ -19,6 +20,10 @@ class InstalledSmoke(unittest.TestCase):
         installed = Path(asdu.__file__).resolve()
         self.assertNotEqual(installed, source / "asdu.py")
         self.assertEqual(installed.read_bytes(), (source / "asdu.py").read_bytes())
+        self.assertEqual(
+            subprocess.check_output(["asdu", "--version"], text=True).strip(),
+            f"asdu {version('asdu')}",
+        )
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             data = root / "data"
