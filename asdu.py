@@ -1107,12 +1107,34 @@ def tui(
         confirm_deletes = ask_before_delete
         query = ""
         status = ""
+        view_key = None
+        view_data = None
+
+        def current_view():
+            """Reuse only this view; navigation must not resolve paths again."""
+            nonlocal view_key, view_data
+            key = (source_filter, mode, browser.cwd_node, sort_by)
+            if key != view_key:
+                visible, grouped = browser_visible_sessions(
+                    sessions, source_filter, mode, browser.cwd_node
+                )
+                items = (
+                    cwd_listing(visible, browser.cwd_node, sort_by)
+                    if mode == "cwd"
+                    else browser_group_items(grouped, mode, sort_by)
+                )
+                scoped = (
+                    [s for s in grouped if in_scope(s, browser.cwd_node)]
+                    if mode == "cwd"
+                    else grouped
+                )
+                view_data = visible, grouped, items, scoped
+                view_key = key
+            return view_data
 
         def refresh_view() -> None:
             nonlocal tree_mode, collapsed_nodes
-            _, current = browser_visible_sessions(
-                sessions, source_filter, mode, browser.cwd_node
-            )
+            _, current, current_items, _ = current_view()
             if browser.detail is None:
                 return
             anchor = (
@@ -1127,7 +1149,7 @@ def tui(
                 else next(
                     (
                         es
-                        for _, key, es in browser_group_items(current, mode, sort_by)
+                        for _, key, es in current_items
                         if key == name
                     ),
                     [],
@@ -1157,15 +1179,13 @@ def tui(
             window.erase()
             height, width = window.getmaxyx()
             page_size = max(1, height - 4)
-            visible, grouped_visible = browser_visible_sessions(
-                sessions, source_filter, mode, browser.cwd_node
-            )
+            visible, grouped_visible, base_items, scoped = current_view()
             if browser.detail is not None and not browser.detail[1]:
                 browser.leave_detail()
                 continue
             if browser.detail is None:
                 if mode == "cwd":
-                    items = cwd_listing(visible, browser.cwd_node, sort_by)
+                    items = base_items
                     direct = [es[0] for kind, _, es in items if kind == "session"]
                     tree_entries = tree_with_ancestors(direct, visible)
                     tree_mode, collapsed_nodes = browser.open_group(
@@ -1193,7 +1213,7 @@ def tui(
                             browser.pending_anchor = links[browser.pending_anchor]
                 else:
                     tree_mode = False
-                    items = browser_group_items(grouped_visible, mode, sort_by)
+                    items = base_items
                 if browser.pending_anchor is not None:
                     browser.selected = next(
                         (
@@ -1359,11 +1379,7 @@ def tui(
             footer_sessions = (
                 browser.detail[1]
                 if browser.detail is not None
-                else [
-                    entry
-                    for entry in grouped_visible
-                    if in_scope(entry, browser.cwd_node)
-                ]
+                else scoped
             )
             footer = (
                 f"Transcripts: {human_size(sum(session.size for session in footer_sessions))}  "
@@ -1521,6 +1537,7 @@ def tui(
                 except OSError as error:
                     status = f"Rescan failed: {error}"
                 else:
+                    view_key = None
                     refresh_view()
                 continue
             if (
@@ -1652,6 +1669,7 @@ def tui(
                         status = str(error)
                     else:
                         sessions.remove(entry)
+                        view_key = None
                         if browser.detail is not None and entry in browser.detail[1]:
                             browser.detail[1].remove(entry)
             elif key == ord("f"):
@@ -1698,7 +1716,6 @@ def tui(
                         )
                         continue
                 else:
-                    items = browser_group_items(grouped_visible, mode, sort_by)
                     if not items:
                         continue
                     _, name, entries = items[browser.selected]

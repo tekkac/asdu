@@ -81,7 +81,9 @@ class Screen:
         )
 
 
-def browse_screen(entries, keys, mode="cwd", sort="name", notice=lambda: ""):
+def browse_screen(
+    entries, keys, mode="cwd", sort="name", notice=lambda: "", rescan=None
+):
     screen = Screen(keys)
     with ExitStack() as stack:
         for name in ("curs_set", "mousemask", "mouseinterval"):
@@ -91,11 +93,72 @@ def browse_screen(entries, keys, mode="cwd", sort="name", notice=lambda: ""):
         stack.enter_context(
             patch.object(asdu.curses, "wrapper", lambda run: run(screen))
         )
-        asdu.tui(entries, mode, sort, Path("/project"), True, lambda _: entries, notice)
+        asdu.tui(
+            entries,
+            mode,
+            sort,
+            Path("/project"),
+            True,
+            rescan or (lambda _: entries),
+            notice,
+        )
     return screen
 
 
 class AsduTests(unittest.TestCase):
+    def test_navigation_reuses_scoped_groups(self):
+        entries = [replace(session(str(i)), tags=(f"tag-{i}",)) for i in range(8)]
+        with (
+            patch.object(
+                asdu, "browser_visible_sessions", wraps=asdu.browser_visible_sessions
+            ) as scope,
+            patch.object(
+                asdu, "browser_group_items", wraps=asdu.browser_group_items
+            ) as groups,
+        ):
+            browse_screen(
+                entries,
+                [asdu.curses.KEY_DOWN, asdu.curses.KEY_UP] * 10 + [10, 127, ord("q")],
+                mode="tag",
+            )
+        self.assertEqual(scope.call_count, 1)
+        self.assertEqual(groups.call_count, 1)
+
+    def test_rescan_rebuilds_view_even_when_session_count_is_unchanged(self):
+        entries = [replace(session("old"), tags=("old-tag",))]
+        new = replace(session("new"), tags=("new-tag",))
+        screen = browse_screen(
+            entries, [ord("r"), ord("q")], mode="tag", rescan=lambda _: [new]
+        )
+        text = " ".join(item[2] for item in screen.frames[-1])
+        self.assertIn("new-tag", text)
+        self.assertNotIn("old-tag", text)
+
+    def test_source_filter_invalidates_current_view(self):
+        entries = [
+            session("codex-task"),
+            replace(session("claude-task"), source="claude"),
+        ]
+        with patch.object(asdu, "choose", return_value="claude"):
+            screen = browse_screen(entries, [ord("f"), ord("q")])
+        text = " ".join(item[2] for item in screen.frames[-1])
+        self.assertIn("claude-task", text)
+        self.assertNotIn("codex-task", text)
+
+    def test_archive_invalidates_current_view(self):
+        entries = [session("archived"), session("remaining")]
+        with (
+            patch.object(asdu, "confirm_session_action", return_value="archive"),
+            patch.object(
+                asdu, "archive_session", return_value=Path("/fictional-archive")
+            ),
+            patch.object(asdu, "record_action"),
+        ):
+            screen = browse_screen(entries, [ord("a"), ord("q")])
+        text = " ".join(item[2] for item in screen.frames[-1])
+        self.assertIn("remaining", text)
+        self.assertNotIn("archived", text)
+
     def test_no_color_flag_and_environment_skip_color_initialization(self):
         for flag, value in ((True, ""), (False, "1")):
             screen = Screen([ord("q")])
