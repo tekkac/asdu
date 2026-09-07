@@ -11,7 +11,8 @@
             agent session disk usage
 ```
 
-`asdu` is a terminal browser for Codex and Claude sessions, inspired by ncdu.
+`asdu` is a terminal browser for Codex, Claude, and OMP sessions, inspired by ncdu.
+OMP support is read-only: browse, tags, trees, and conversation briefs.
 Find large conversations, see what they were about, and archive or trash them.
 Everything runs locally.
 
@@ -68,6 +69,7 @@ Fictional sessions, shown without terminal colors:
     16.0 MiB  codex   child     1d ago    ├─ Find the race condition
      8.0 MiB  codex   child     1d ago    └─ Remove the lucky sleep
     18.2 MiB  claude  main      2h ago  Center a div without changing physics
+     9.7 KiB  omp     main     29d ago  hello?
 
  Transcripts: 1.6 GiB  16 sessions
  Enter open  g group  f filter  s sort  t tree  a action  ? help
@@ -99,7 +101,8 @@ Resume: claude --resume demo-css-001
 ```
 
 Briefs show recent excerpts first while full counts load in the background.
-The resume command is ready to copy into your shell.
+OMP briefs also identify the provider and latest model used. Resume commands are
+shown when the source supports them.
 
 ## Clean up
 
@@ -120,9 +123,10 @@ Bug reports, UI improvements, and support for other agents are welcome.
 Keep changes small and use fictional sessions in tests.
 Keep normal browsing cache-free; justify additional caching with measurements.
 
-The code has three parts: `asdu_sessions.py` reads transcripts and handles storage
-actions, `asdu_browser.py` groups sessions and manages trees, and `asdu.py` owns
-the terminal UI and command-line entry point.
+Source readers live in `asdu_sources/`. Shared scanning and file actions live in
+`asdu_sessions.py`, grouping and trees in `asdu_browser.py`, and the terminal UI
+in `asdu.py`. Add readers to the explicit registry; new sources are read-only
+unless their storage actions have been reviewed.
 
 From a checkout, run `uv run asdu.py` to try the app. Run the tests with:
 

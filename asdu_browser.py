@@ -144,14 +144,14 @@ def ordered_sessions(sessions: Iterable[Session], sort_by: str) -> list[Session]
 
 
 def row_id(entry: Session) -> str:
-    return f"{entry.source}:{entry.path}"
+    return entry.storage_key
 
 
 def parent_links(entries: Iterable[Session]) -> dict[str, str]:
     entries = list(entries)
     candidates: dict[tuple[str, str], list[Session]] = defaultdict(list)
     for entry in entries:
-        candidates[entry.source, entry.session_id].append(entry)
+        candidates[entry.key].append(entry)
     links = {}
     for entry in entries:
         parents = candidates.get((entry.source, entry.parent_id), [])
@@ -243,20 +243,20 @@ def tree_with_ancestors(
     """
     candidate_lists: dict[tuple[str, str], list[Session]] = defaultdict(list)
     for entry in candidates:
-        candidate_lists[(entry.source, entry.session_id)].append(entry)
+        candidate_lists[entry.key].append(entry)
     # Session IDs are unique for Codex, but Claude can emit several transcript
     # files for one session.  Only a unique ID is safe to use as a parent link.
     known = {
         key: values[0] for key, values in candidate_lists.items() if len(values) == 1
     }
-    result = {(entry.source, str(entry.path)): entry for entry in entries}
+    result = {entry.storage_key: entry for entry in entries}
     pending = list(entries)
     while pending:
         entry = pending.pop()
         if not entry.parent_id:
             continue
         parent = known.get((entry.source, entry.parent_id))
-        key = (parent.source, str(parent.path)) if parent else None
+        key = parent.storage_key if parent else None
         if parent is not None and key not in result:
             result[key] = parent
             pending.append(parent)
@@ -370,6 +370,7 @@ def find_match(labels: list[str], query: str, start: int, step: int = 1) -> int:
 
 def origin_label(origin: str) -> str:
     return {
+        "unknown": "?",  # Diagnostic marker while provenance coverage grows.
         "primary": "main",
         "subagent": "child",
         "sidechain": "side",

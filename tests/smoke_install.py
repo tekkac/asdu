@@ -14,6 +14,9 @@ from unittest.mock import patch
 import asdu
 import asdu_browser as browser
 import asdu_sessions as transcripts
+from asdu_sources import claude as claude_reader
+from asdu_sources import codex as codex_reader
+from asdu_sources import omp as omp_reader
 
 
 class InstalledSmoke(unittest.TestCase):
@@ -22,6 +25,11 @@ class InstalledSmoke(unittest.TestCase):
         for module in (asdu, transcripts, browser):
             installed = Path(module.__file__).resolve()
             original = source / installed.name
+            self.assertNotEqual(installed, original)
+            self.assertEqual(installed.read_bytes(), original.read_bytes())
+        for module in (codex_reader, claude_reader, omp_reader):
+            installed = Path(module.__file__).resolve()
+            original = source / "asdu_sources" / installed.name
             self.assertNotEqual(installed, original)
             self.assertEqual(installed.read_bytes(), original.read_bytes())
         self.assertEqual(
@@ -41,14 +49,14 @@ class InstalledSmoke(unittest.TestCase):
                 shutil.copy(fixtures / "claude-test.jsonl", claude)
                 progress = asdu.ScanProgress(False)
                 cache = transcripts.ContentCache(False)
-                entries = transcripts.scan_codex(
-                    codex, [], False, progress, cache, None
-                )
-                entries += transcripts.scan_claude(
-                    claude, [], False, progress, cache, None
-                )
+                entries = codex_reader.discover(codex, [], False, progress, cache, None)
+                entries += claude_reader.discover(claude, [], False, progress, cache, None)
+                omp = root / "omp"
+                omp.mkdir()
+                shutil.copy(fixtures / "omp-test.jsonl", omp)
+                entries += omp_reader.discover(omp, [], False, progress, cache, None)
                 self.assertEqual(
-                    {entry.source for entry in entries}, {"codex", "claude"}
+                    {entry.source for entry in entries}, {"codex", "claude", "omp"}
                 )
                 self.assertEqual(len(progress.invalid), 1)
                 for entry in entries:
@@ -58,6 +66,8 @@ class InstalledSmoke(unittest.TestCase):
                     str(codex),
                     "--claude-root",
                     str(claude),
+                    "--omp-root",
+                    str(omp),
                     "--all",
                 ]
                 for command in ("summary", "sessions", "digest"):

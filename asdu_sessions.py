@@ -13,6 +13,7 @@ import tempfile
 import tomllib
 from collections import Counter
 from dataclasses import dataclass, replace
+from dataclasses import field as dataclass_field
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable, Protocol
@@ -90,6 +91,8 @@ class BriefData:
     recorded_via: list[str]
     task_path: str
     forked_from: str
+    providers: list[str] = dataclass_field(default_factory=list)
+    latest_model: str = ""
 
 
 @dataclass(frozen=True)
@@ -114,11 +117,26 @@ class Session:
     task_path: str = ""
     forked_from: str = ""
 
+    @property
+    def key(self) -> tuple[str, str]:
+        return self.source, self.session_id
+
+    @property
+    def storage_key(self) -> str:
+        """Opaque browser identity; distinct files may share a native session ID."""
+        return f"{self.source}:{self.path}"
+
+    @property
+    def actions(self) -> frozenset[str]:
+        from asdu_sources import ACTIONS
+
+        return ACTIONS.get(self.source, frozenset())
+
 
 class ContentCache:
     """Cache source-aware user-message keyword results outside session stores."""
 
-    EXTRACTOR_VERSION = 3
+    EXTRACTOR_VERSION = 4
 
     def __init__(self, enabled: bool) -> None:
         self.enabled = enabled
@@ -231,17 +249,6 @@ def load_tag_rules(config: Path | None) -> list[TagRule]:
     return rules
 
 
-def load_titles(codex_home: Path) -> dict[str, str]:
-    index = codex_home / "session_index.jsonl"
-    titles: dict[str, str] = {}
-    for item in iter_jsonl(index):
-        session_id = item.get("id")
-        title = item.get("thread_name")
-        if isinstance(session_id, str) and isinstance(title, str) and title.strip():
-            titles[session_id] = title.strip()
-    return titles
-
-
 def iter_jsonl(
     path: Path, limit: int | None = None, progress: ScanReporter | None = None
 ) -> Iterable[dict[str, object]]:
@@ -263,84 +270,6 @@ def iter_jsonl(
                     progress.invalid.add(path)
     except OSError:
         return
-
-
-def task_metadata(payload: dict) -> tuple[str, str]:
-    """Use explicit spawn/fork fields, never infer a task from inherited text."""
-    spawn = payload.get("source")
-    for key in ("subagent", "thread_spawn"):
-        spawn = spawn.get(key) if isinstance(spawn, dict) else None
-    task = spawn.get("agent_path") if isinstance(spawn, dict) else None
-    fork = payload.get("forked_from_id")
-    return (
-        task if isinstance(task, str) and task.strip("/") else "",
-        fork if isinstance(fork, str) else "",
-    )
-
-
-def read_metadata(
-    path: Path, details: dict | None = None, progress: ScanReporter | None = None
-) -> tuple[str, str, str, str | None]:
-    """Read only the initial metadata records, not a whole transcript."""
-    for item in iter_jsonl(path, 32, progress):
-        if item.get("type") != "session_meta":
-            continue
-        payload = item.get("payload", {})
-        if not isinstance(payload, dict):
-            break
-        if details is not None:
-            details.update(payload)
-        cwd = payload.get("cwd")
-        session_id = payload.get("id") or payload.get("session_id")
-        parent_id = payload.get("parent_thread_id")
-        thread_source = payload.get("thread_source")
-        source = payload.get("source")
-        subagent = source.get("subagent") if isinstance(source, dict) else None
-        spawn = subagent.get("thread_spawn") if isinstance(subagent, dict) else None
-        if not isinstance(parent_id, str) or not parent_id:
-            parent_id = (
-                spawn.get("parent_thread_id") if isinstance(spawn, dict) else None
-            )
-        # Relationship and launcher are separate: an IDE can launch a child.
-        if thread_source == "guardian_review" or (
-            isinstance(subagent, dict) and subagent.get("other") == "guardian"
-        ):
-            origin = "review"
-        elif (
-            parent_id
-            or thread_source == "subagent"
-            or (isinstance(source, dict) and "subagent" in source)
-        ):
-            origin = "subagent"
-        elif thread_source == "user" or source in ("cli", "vscode", "exec"):
-            origin = "primary"
-        else:
-            origin = "unknown"
-        return (
-            cwd if isinstance(cwd, str) else "(unknown)",
-            session_id if isinstance(session_id, str) else path.stem,
-            origin,
-            parent_id if isinstance(parent_id, str) else None,
-        )
-    return "(unknown)", path.stem, "unknown", None
-
-
-def derive_title(path: Path) -> str:
-    """Use the first real user request when session_index lacks a title.
-
-    Codex serializes environment, skill, and AGENTS.md material as user-role
-    messages too, so those preambles are deliberately skipped.  The bounded
-    scan keeps an inventory fast even when a rollout is hundreds of megabytes.
-    """
-    fallback = ""
-    for item in iter_jsonl(path, 4096):
-        for text in user_texts("codex", item):
-            title = substantive_user_text(text)
-            if title:
-                return title
-        for text in assistant_texts("codex", item):
-            fallback = text
-    return f"reply: {fallback}" if fallback else "untitled"
 
 
 def untitled_title(first_request: str) -> str:
@@ -381,20 +310,9 @@ def message_texts(payload: dict) -> list[str]:
 
 
 def assistant_texts(source: str, item: dict) -> list[str]:
-    """Read assistant prose for both title fallbacks and briefs, excluding tools."""
-    if source == "codex" and item.get("type") == "response_item":
-        message = item.get("payload")
-    elif source == "claude":
-        message = item.get("message")
-    else:
-        return []
-    if not isinstance(message, dict) or message.get("role") != "assistant":
-        return []
-    content = message.get("content")
-    if source == "claude" and isinstance(content, str):
-        clean = " ".join(content.split())
-        return [clean] if clean else []
-    return message_texts(message)
+    from asdu_sources import READERS
+
+    return READERS[source].assistant_texts(item)
 
 
 def is_real_user_text(text: str) -> bool:
@@ -447,44 +365,10 @@ def resume_command(session: Session) -> str | None:
     return f"{command} {shlex.quote(session.session_id)}"
 
 
-def user_texts(source: str, item: dict[str, object]) -> Iterable[str]:
-    """Emit searchable user text, never metadata, tools, or injected context."""
-    if source == "codex":
-        if item.get("type") == "event_msg":
-            payload = item.get("payload")
-            if isinstance(payload, dict) and payload.get("type") == "user_message":
-                message = payload.get("message")
-                if isinstance(message, str):
-                    yield message
-        elif item.get("type") == "response_item":
-            payload = item.get("payload")
-            if isinstance(payload, dict) and payload.get("role") == "user":
-                yield from message_texts(payload)
-        return
+def user_texts(source: str, item: dict) -> Iterable[str]:
+    from asdu_sources import READERS
 
-    if source == "claude":
-        if item.get("isMeta") is True:
-            return
-        message = item.get("message")
-        if isinstance(message, dict) and message.get("role") == "user":
-            content = message.get("content")
-            if isinstance(content, str):
-                yield content
-            elif isinstance(content, list):
-                for block in content:
-                    if (
-                        isinstance(block, dict)
-                        and block.get("type") == "text"
-                        and isinstance(block.get("text"), str)
-                    ):
-                        yield block["text"]
-        elif (
-            item.get("type") == "queue-operation" and item.get("operation") == "enqueue"
-        ):
-            content = item.get("content")
-            if isinstance(content, str):
-                yield content
-        return
+    return READERS[source].user_texts(item)
 
 
 def transcript_keywords(
@@ -494,6 +378,10 @@ def transcript_keywords(
     report_bytes: Callable[[int], None] | None = None,
 ) -> set[str]:
     """Mine only source-recognized user messages, streaming one JSONL file."""
+    from asdu_sources import READERS
+
+    read_users = READERS[source].user_texts
+    clean_user_text = READERS[source].clean_user_text
     remaining = {keyword.casefold() for keyword in keywords if keyword}
     found: set[str] = set()
     if not remaining:
@@ -513,8 +401,8 @@ def transcript_keywords(
                     continue
                 if not isinstance(item, dict):
                     continue
-                for text in user_texts(source, item):
-                    clean = substantive_user_text(text).casefold()
+                for text in read_users(item):
+                    clean = clean_user_text(text).casefold()
                     matched = {keyword for keyword in remaining if keyword in clean}
                     found.update(matched)
                     remaining.difference_update(matched)
@@ -618,142 +506,6 @@ def scan_paths(
     return sessions
 
 
-def scan_codex(
-    root: Path,
-    rules: list[TagRule],
-    content_keywords: bool,
-    progress: ScanReporter,
-    cache: ContentCache,
-    scope: Path | None,
-) -> list[Session]:
-    # The normal root is ~/.codex/sessions, whose direct parent owns
-    # session_index.jsonl. Custom roots simply use their direct parent too.
-    titles = load_titles(root.parent)
-
-    def inspect(path: Path) -> Session | None:
-        try:
-            stat = path.stat()
-            size, modified = stat.st_size, stat.st_mtime
-            details: dict = {}
-            cwd, session_id, origin, parent_id = read_metadata(path, details, progress)
-        except OSError:
-            return None
-        if not details:
-            return None
-        session = Session(
-            path,
-            size,
-            modified,
-            "codex",
-            origin,
-            cwd,
-            session_id,
-            parent_id,
-            "",
-            (),
-            *task_metadata(details),
-        )
-        if not in_scope(session, scope):
-            return session
-        title = (
-            session_label(session)
-            if session.task_path
-            else titles.get(session_id) or untitled_title(derive_title(path))
-        )
-        return replace(session, title=title)
-
-    return scan_paths(
-        "codex",
-        "Codex",
-        root.rglob("rollout-*.jsonl"),
-        inspect,
-        rules,
-        content_keywords,
-        progress,
-        cache,
-        scope,
-    )
-
-
-def scan_claude(
-    root: Path,
-    rules: list[TagRule],
-    content_keywords: bool,
-    progress: ScanReporter,
-    cache: ContentCache,
-    scope: Path | None,
-) -> list[Session]:
-    """Small native Claude reader: CWD + session id live in normal JSONL events."""
-
-    def inspect(path: Path) -> Session | None:
-        cwd, session_id, origin, parent_id = "(unknown)", path.stem, "unknown", None
-        title = "untitled"
-        fallback = ""
-        recognized = False
-        for item in iter_jsonl(path, 4096, progress):
-            if isinstance(item.get("cwd"), str):
-                cwd = item["cwd"]
-            if isinstance(item.get("sessionId"), str):
-                session_id = item["sessionId"]
-                recognized = True
-            if item.get("isSidechain") is False and origin != "sidechain":
-                origin = "primary"
-            if item.get("isSidechain") is True:
-                # Claude exposes message parents, not a parent session.
-                origin = "sidechain"
-            candidate = (
-                next(iter(user_texts("claude", item)), "")
-                if title == "untitled"
-                else ""
-            )
-            for text in assistant_texts("claude", item):
-                fallback = text
-            if candidate:
-                clean = substantive_user_text(candidate)
-                if clean:
-                    title = clean
-            if cwd != "(unknown)" and session_id != path.stem and title != "untitled":
-                break
-        if not recognized and cwd == "(unknown)":
-            return None
-        try:
-            stat = path.stat()
-            size, modified = stat.st_size, stat.st_mtime
-        except OSError:
-            return None
-        title = untitled_title(
-            title
-            if title != "untitled"
-            else f"reply: {fallback}"
-            if fallback
-            else title
-        )
-        return Session(
-            path,
-            size,
-            modified,
-            "claude",
-            origin,
-            cwd,
-            session_id,
-            parent_id,
-            title,
-            (),
-        )
-
-    return scan_paths(
-        "claude",
-        "Claude",
-        root.rglob("*.jsonl"),
-        inspect,
-        rules,
-        content_keywords,
-        progress,
-        cache,
-        scope,
-    )
-
-
 @dataclass(frozen=True)
 class SourceAdapter:
     """One local transcript format and the reader that understands it."""
@@ -762,10 +514,17 @@ class SourceAdapter:
     scan: Callable[..., list[Session]]
 
 
-def source_adapters(codex_root: Path, claude_root: Path) -> dict[str, SourceAdapter]:
+def source_adapters(
+    codex_root: Path, claude_root: Path, omp_root: Path | None = None
+) -> dict[str, SourceAdapter]:
+    from asdu_sources import READERS
+
+    roots = {"codex": codex_root, "claude": claude_root}
+    if omp_root is not None:
+        roots["omp"] = omp_root
     return {
-        "codex": SourceAdapter(codex_root, scan_codex),
-        "claude": SourceAdapter(claude_root, scan_claude),
+        name: SourceAdapter(root, READERS[name].discover)
+        for name, root in roots.items()
     }
 
 
@@ -822,12 +581,22 @@ def require_unchanged(session: Session) -> None:
         raise OSError("session changed since scan; rescan before acting")
 
 
+def require_action(session: Session, action: str) -> None:
+    if action not in session.actions:
+        raise OSError(f"{session.source} sessions are read-only for {action}")
+
+
+def trash_session(session: Session) -> None:
+    require_action(session, "trash")
+    require_unchanged(session)
+    move_to_trash(session.path)
+
+
 def archive_session(session: Session) -> Path:
     """Compress a transcript into a dated, user-owned archive and remove it."""
     day = datetime.now().astimezone().strftime("%Y-%m-%d")
     data_home = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
-    if session.source not in {"codex", "claude"}:
-        raise OSError("Unsupported archive source")
+    require_action(session, "archive")
     directory = data_home / "asdu" / "archive" / day / session.source
     directory.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix="session-", suffix=".jsonl.gz", dir=directory)
@@ -903,25 +672,22 @@ def disable_delete_confirmation() -> None:
         pass
 
 
-def read_brief(
-    session: Session, poll: Callable[[], None] | None = None, preview: bool = False
+def read_brief(session: Session, poll=None, preview: bool = False) -> BriefData:
+    from asdu_sources import READERS
+
+    return READERS[session.source].load_brief(session, poll, preview)
+
+
+def read_jsonl_brief(
+    session: Session, poll=None, preview=False, enrich=None
 ) -> BriefData:
-    """Read brief data without terminal formatting or model calls."""
-    first_user: str | None = None
-    latest_user: str | None = None
-    latest_reply: str | None = None
-    first_objective: str | None = None
-    event_counts: Counter[str] = Counter()
-    recorded_via: list[str] = []
-    task_path, forked_from = session.task_path, session.forked_from
+    """Shared streaming and preview mechanics; formats belong to source readers."""
+    from asdu_sources import READERS
 
-    def remember_user(text: str) -> None:
-        nonlocal first_user, latest_user
-        if not text:
-            return
-        first_user = first_user or text
-        latest_user = text
-
+    reader = READERS[session.source]
+    data = BriefData(
+        None, None, None, None, Counter(), [], session.task_path, session.forked_from
+    )
     with (
         preview_transcript(session.path)
         if preview
@@ -936,55 +702,14 @@ def read_brief(
                 continue
             if not isinstance(item, dict):
                 continue
-            event_counts[str(item.get("type", "unknown"))] += 1
-            if session.source == "codex" and item.get("type") == "session_meta":
-                payload = item.get("payload")
-                if isinstance(payload, dict):
-                    task_path, forked_from = task_metadata(payload)
-                    source = payload.get("source")
-                    originator = payload.get("originator")
-                    provider = payload.get("model_provider")
-                    if source == "vscode" or originator == "codex_vscode":
-                        recorded_via.append("VS Code")
-                    elif source == "exec":
-                        recorded_via.append("Codex Exec")
-                    if originator == "codex_sdk_ts":
-                        recorded_via.append("Codex SDK (TypeScript)")
-                    elif originator == "codex_exec":
-                        recorded_via.append("Codex Exec")
-                    if isinstance(provider, str) and provider:
-                        recorded_via.append(f"provider: {provider}")
-            elif session.source == "claude":
-                entrypoint = item.get("entrypoint")
-                if entrypoint == "claude-vscode":
-                    recorded_via.append("VS Code")
-                elif isinstance(entrypoint, str) and entrypoint:
-                    recorded_via.append(entrypoint)
-            if item.get("type") == "event_msg":
-                payload = item.get("payload")
-                if (
-                    isinstance(payload, dict)
-                    and payload.get("type") == "thread_goal_updated"
-                ):
-                    goal = payload.get("goal")
-                    if isinstance(goal, dict) and isinstance(
-                        goal.get("objective"), str
-                    ):
-                        first_objective = first_objective or " ".join(
-                            goal["objective"].split()
-                        )
-            for text in user_texts(session.source, item):
-                remember_user(substantive_user_text(text))
-            for text in assistant_texts(session.source, item):
-                latest_reply = text
-
-    return BriefData(
-        first_user,
-        latest_user,
-        latest_reply,
-        first_objective,
-        event_counts,
-        recorded_via,
-        task_path,
-        forked_from,
-    )
+            data.event_counts[str(item.get("type", "unknown"))] += 1
+            if enrich is not None:
+                enrich(item, data)
+            for text in reader.user_texts(item):
+                clean = reader.clean_user_text(text)
+                if clean:
+                    data.first_user = data.first_user or clean
+                    data.latest_user = clean
+            for text in reader.assistant_texts(item):
+                data.latest_reply = text
+    return data

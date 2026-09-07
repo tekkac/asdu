@@ -7,6 +7,7 @@ FROM python:3.11-slim-bookworm
 WORKDIR /src
 COPY pyproject.toml MANIFEST.in LICENSE README.md asdu.py asdu_sessions.py asdu_browser.py asdu.toml.example ./
 COPY tests ./tests
+COPY asdu_sources ./asdu_sources
 RUN python -m pip wheel --no-cache-dir --wheel-dir /wheels . \
     && python -m pip install --no-index --find-links=/wheels asdu \
     && useradd --create-home smoke

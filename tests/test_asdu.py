@@ -26,6 +26,7 @@ sys.path.insert(0, str(SCRIPT.parent))
 SPEC.loader.exec_module(asdu)
 import asdu_browser as browser  # noqa: E402 - import from the source checkout
 import asdu_sessions as transcripts  # noqa: E402
+from asdu_sources import claude, codex  # noqa: E402
 
 
 def session(identifier: str, parent: str | None = None) -> object:
@@ -327,7 +328,7 @@ class AsduTests(unittest.TestCase):
                     )
                 ]
                 path.write_text("\n".join(map(json.dumps, records)))
-                entries = getattr(transcripts, f"scan_{source}")(
+                entries = {"codex": codex, "claude": claude}[source].discover(
                     Path(directory),
                     [],
                     False,
@@ -553,7 +554,7 @@ class AsduTests(unittest.TestCase):
                 (root / "rollout-demo.jsonl").write_text(
                     "\n".join(json.dumps(record) for record in records)
                 )
-                entries = getattr(transcripts, f"scan_{source}")(
+                entries = {"codex": codex, "claude": claude}[source].discover(
                     root,
                     [],
                     False,
@@ -618,7 +619,7 @@ class AsduTests(unittest.TestCase):
                 for name, content in (("empty", ""), ("broken", "oops\n")):
                     (root / f"rollout-{name}.jsonl").write_text(content)
                 progress = asdu.ScanProgress(False)
-                entries = getattr(transcripts, f"scan_{source}")(
+                entries = {"codex": codex, "claude": claude}[source].discover(
                     root,
                     [],
                     False,
@@ -665,18 +666,18 @@ class AsduTests(unittest.TestCase):
         for top, expected in ((None, "parent"), ("explicit", "explicit")):
             payload = {"source": source, "parent_thread_id": top}
             with patch.object(
-                transcripts,
+                codex,
                 "iter_jsonl",
                 return_value=[{"type": "session_meta", "payload": payload}],
             ):
-                self.assertEqual(transcripts.read_metadata(Path("/demo"))[3], expected)
+                self.assertEqual(codex.read_metadata(Path("/demo"))[3], expected)
         payload = {"source": {"subagent": {"other": "guardian"}}}
         with patch.object(
-            transcripts,
+            codex,
             "iter_jsonl",
             return_value=[{"type": "session_meta", "payload": payload}],
         ):
-            metadata = transcripts.read_metadata(Path("/demo"))
+            metadata = codex.read_metadata(Path("/demo"))
             self.assertEqual(metadata[2], "review")
             self.assertIsNone(metadata[3])
 
@@ -854,11 +855,11 @@ class AsduTests(unittest.TestCase):
                 json.dumps({"type": "session_meta", "payload": metadata}) + "\n"
             )
             with patch.object(
-                transcripts,
+                codex,
                 "derive_title",
                 side_effect=AssertionError("Task title needs no transcript scan"),
             ):
-                entries = transcripts.scan_codex(
+                entries = codex.discover(
                     Path(directory),
                     [],
                     False,
@@ -884,7 +885,7 @@ class AsduTests(unittest.TestCase):
             {"source": {"subagent": {"thread_spawn": {"agent_path": 3}}}},
             {"source": {"subagent": "bad"}, "forked_from_id": []},
         ):
-            self.assertEqual(transcripts.task_metadata(payload), ("", ""))
+            self.assertEqual(codex.task_metadata(payload), ("", ""))
         self.assertEqual(transcripts.session_label(session("original")), "original")
 
     def test_chooser_highlight_stays_inside_border(self):
@@ -1067,11 +1068,11 @@ class AsduTests(unittest.TestCase):
             ({}, "unknown"),
         ):
             with patch.object(
-                transcripts,
+                codex,
                 "iter_jsonl",
                 return_value=[{"type": "session_meta", "payload": fields}],
             ):
-                self.assertEqual(transcripts.read_metadata(Path("/demo"))[2], expected)
+                self.assertEqual(codex.read_metadata(Path("/demo"))[2], expected)
 
     def test_claude_queue_and_meta_are_consistent(self):
         records = [
@@ -1093,7 +1094,7 @@ class AsduTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "queue.jsonl"
             path.write_text("\n".join(map(json.dumps, records)))
-            entries = transcripts.scan_claude(
+            entries = claude.discover(
                 Path(directory),
                 [],
                 False,
@@ -1147,10 +1148,10 @@ class AsduTests(unittest.TestCase):
                 )
             )
             with patch.object(
-                transcripts, "derive_title", side_effect=AssertionError("unneeded read")
+                codex, "derive_title", side_effect=AssertionError("unneeded read")
             ):
                 self.assertEqual(
-                    transcripts.scan_codex(
+                    codex.discover(
                         Path(directory),
                         [],
                         False,
@@ -1497,8 +1498,8 @@ class AsduTests(unittest.TestCase):
         progress = asdu.ScanProgress(False)
         cache = transcripts.ContentCache(False)
         scanners = [
-            ("rollout-codex.jsonl", transcripts.scan_codex, "codex-test-001", "codex"),
-            ("claude-test.jsonl", transcripts.scan_claude, "claude-test-001", "claude"),
+            ("rollout-codex.jsonl", codex.discover, "codex-test-001", "codex"),
+            ("claude-test.jsonl", claude.discover, "claude-test-001", "claude"),
         ]
         for filename, scanner, identifier, source in scanners:
             with (

@@ -1,0 +1,5 @@
+{"type":"title","title":"Inspect the moon-cheese deployment","v":1}
+{"type":"session","version":3,"id":"omp-test-001","cwd":"/fictional/moon","timestamp":"2026-01-01T00:00:00Z"}
+{"type":"message","id":"m1","parentId":"not-a-session","message":{"role":"user","content":[{"type":"text","text":"Please inspect the deployment configuration."}]}}
+{"type":"message","id":"m2","parentId":"m1","message":{"role":"assistant","provider":"fictional-cloud","model":"moon-model-v2","content":[{"type":"thinking","thinking":"secret phrase"},{"type":"text","text":"The fictional fixture inspected successfully."}]}}
+{"type":"message","id":"m3","parentId":"m2","message":{"role":"toolResult","content":[{"type":"text","text":"security audit should not become a tag"}]}}

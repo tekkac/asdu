@@ -53,15 +53,14 @@ from asdu_sessions import (
     disable_delete_confirmation,
     in_scope,
     load_tag_rules,
-    move_to_trash,
     read_brief,
     record_action,
-    require_unchanged,
     resume_command,
     scan,
     session_label,
     skip_delete_confirmation,
     source_adapters,
+    trash_session,
 )
 
 ASCII_UI = False
@@ -366,6 +365,10 @@ def read_digest(
         initial_label += " (may be inherited)"
     provenance = list(dict.fromkeys(data.recorded_via))
     metadata = [f"Recorded via: {', '.join(provenance)}"] if provenance else []
+    if data.providers:
+        metadata.append(f"Provider: {' → '.join(data.providers)}")
+    if data.latest_model:
+        metadata.append(f"Model: {data.latest_model}")
     if data.task_path:
         metadata.append(f"Task: {data.task_path}")
     if data.forked_from:
@@ -602,7 +605,7 @@ def origin_color(origin: str) -> int:
 
 
 def source_color(source: str) -> int:
-    return {"codex": 7, "claude": 8}.get(source, 0)
+    return {"codex": 7, "claude": 8, "omp": 10}.get(source, 0)
 
 
 def draw_session_line(
@@ -731,15 +734,22 @@ def action_dialog(window, title, body, options, default, shortcuts):
 
 
 def confirm_session_action(window: curses.window, session: Session) -> str | None:
+    actions = [action for action in ("archive", "trash") if action in session.actions]
     return action_dialog(
         window,
         "Session action",
-        [session_label(session), "Archive compresses; Trash is recoverable."],
-        ["archive", "trash", "cancel"],
-        "archive",
+        [
+            session_label(session),
+            "Archive compresses; Trash is recoverable."
+            if actions
+            else "Read-only source.",
+        ],
+        [*actions, "cancel"],
+        actions[0] if actions else "cancel",
         {
             ord(key): choice
             for keys, choice in (("aA", "archive"), ("tT", "trash"))
+            if choice in actions
             for key in keys
         },
     )
@@ -897,9 +907,18 @@ def wrap_cells(raw: str, width: int) -> list[str]:
 def draw_brief_line(window, row: int, line: str) -> None:
     heading = line.startswith(("╭ ", "├ "))
     metadata = line.startswith(
-        ("ID:", "Folder:", "Task:", "Forked from:", "Parent session:", "Recorded via:")
+        (
+            "ID:",
+            "Folder:",
+            "Task:",
+            "Forked from:",
+            "Parent session:",
+            "Recorded via:",
+            "Provider:",
+            "Model:",
+        )
     )
-    header = re.match(r"^\S+ (?:B|KiB|MiB|GiB|TiB)  (codex|claude) ", line)
+    header = re.match(r"^\S+ (?:B|KiB|MiB|GiB|TiB)  (\w+) ", line)
     draw_line(window, row, line, bold=heading, dim=metadata or bool(header))
     width = window.getmaxyx()[1]
     if line.startswith(("╭", "├", "│", "╰")) and width > 1:
@@ -1063,15 +1082,22 @@ def tui(
     def run(window: curses.window) -> None:
         window = TerminalWindow(window)
         curses.curs_set(0)
+        # Zellij owns pane-local selection and translates alternate-screen
+        # scrolling into arrows. Capturing clicks here steals its selection.
+        capture_mouse = not os.environ.get("ZELLIJ")
         # New curses decodes wheel reports itself; old builds without BUTTON5
         # need the raw SGR parser. Both preserve wheel/keyboard provenance.
         try:
             down_button = getattr(curses, "BUTTON5_PRESSED", 0)
-            curses.mousemask(curses.BUTTON4_PRESSED | down_button if down_button else 0)
+            curses.mousemask(
+                curses.BUTTON4_PRESSED | down_button
+                if capture_mouse and down_button
+                else 0
+            )
             curses.mouseinterval(0)
         except curses.error:
             pass
-        if sys.stdout.isatty():
+        if capture_mouse and sys.stdout.isatty():
             sys.stdout.write("\x1b[?1000h\x1b[?1006h")
             sys.stdout.flush()
         window.colors_enabled = (
@@ -1089,10 +1115,12 @@ def tui(
             if curses.COLORS >= 256:
                 curses.init_pair(7, 33, -1)  # Codex: bright blue
                 curses.init_pair(8, 208, -1)  # Claude: orange
+                curses.init_pair(10, 37, -1)  # OMP: teal
                 curses.init_pair(9, 255, 237)  # Selection: white on charcoal
             else:
                 curses.init_pair(7, curses.COLOR_CYAN, -1)
                 curses.init_pair(8, curses.COLOR_YELLOW, -1)
+                curses.init_pair(10, curses.COLOR_GREEN, -1)
                 curses.init_pair(9, curses.COLOR_WHITE, curses.COLOR_BLACK)
             window.selection_attr = curses.color_pair(9)
         mode, sort_by, source_filter, tree_mode = (
@@ -1147,11 +1175,7 @@ def tui(
                 [s for s in current if Path(s.cwd).resolve() == browser.cwd_node]
                 if mode == "cwd"
                 else next(
-                    (
-                        es
-                        for _, key, es in current_items
-                        if key == name
-                    ),
+                    (es for _, key, es in current_items if key == name),
                     [],
                 )
             )
@@ -1377,9 +1401,7 @@ def tui(
                     tree_children[parent].append(index)
 
             footer_sessions = (
-                browser.detail[1]
-                if browser.detail is not None
-                else scoped
+                browser.detail[1] if browser.detail is not None else scoped
             )
             footer = (
                 f"Transcripts: {human_size(sum(session.size for session in footer_sessions))}  "
@@ -1659,8 +1681,7 @@ def tui(
                             except OSError as error:
                                 status = f"Archived; action log unavailable: {error}"
                         else:
-                            require_unchanged(entry)
-                            move_to_trash(entry.path)
+                            trash_session(entry)
                             try:
                                 record_action("trash", entry)
                             except OSError as error:
@@ -1783,7 +1804,7 @@ def run_main() -> int:
     parser = argparse.ArgumentParser(
         description="ncdu-style browser for local agent session storage."
     )
-    parser.add_argument("--version", action="version", version="asdu 0.1.3")
+    parser.add_argument("--version", action="version", version="asdu 0.2.0")
     parser.add_argument(
         "command",
         nargs="?",
@@ -1803,8 +1824,14 @@ def run_main() -> int:
         help="Claude session storage directory",
     )
     parser.add_argument(
+        "--omp-root",
+        type=Path,
+        default=Path.home() / ".omp" / "agent" / "sessions",
+        help="OMP session storage directory (read-only)",
+    )
+    parser.add_argument(
         "--source",
-        choices=("codex", "claude"),
+        choices=("codex", "claude", "omp"),
         action="append",
         help="Repeat to select sources; default is all available",
     )
@@ -1878,8 +1905,8 @@ def run_main() -> int:
         rules = load_tag_rules(args.config)
     except (OSError, tomllib.TOMLDecodeError, ValueError) as error:
         parser.error(str(error))
-    sources = tuple(dict.fromkeys(args.source or ("codex", "claude")))
-    adapters = source_adapters(args.codex_root, args.claude_root)
+    adapters = source_adapters(args.codex_root, args.claude_root, args.omp_root)
+    sources = tuple(dict.fromkeys(args.source or adapters))
     source_roots = {source: adapter.root for source, adapter in adapters.items()}
     if args.source:
         for source in sources:
@@ -1889,7 +1916,7 @@ def run_main() -> int:
                 )
     elif not any(root.exists() for root in source_roots.values()):
         parser.error(
-            "no supported session roots found; pass --codex-root or --claude-root"
+            "no supported session roots found; pass --codex-root, --claude-root, or --omp-root"
         )
     scope = None if args.all else (args.project or Path.cwd()).resolve()
 

@@ -19,6 +19,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class TerminalTests(unittest.TestCase):
+    zellij = False
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
@@ -28,6 +30,9 @@ class TerminalTests(unittest.TestCase):
         self.resize(24, 100)
         self.original_modes = termios.tcgetattr(self.slave)
         env = dict(os.environ, TERM="xterm-256color", LC_ALL="C.UTF-8")
+        env.pop("ZELLIJ", None)
+        if self.zellij:
+            env["ZELLIJ"] = "1"
         for key in (
             "XDG_CACHE_HOME",
             "XDG_CONFIG_HOME",
@@ -45,6 +50,8 @@ class TerminalTests(unittest.TestCase):
                 "--codex-root",
                 str(fixtures),
                 "--claude-root",
+                self.directory.name,
+                "--omp-root",
                 self.directory.name,
             ],
             stdin=self.slave,
@@ -96,7 +103,14 @@ class TerminalTests(unittest.TestCase):
         )
         self.read_for(0.05)
         self.assertNotIn(b"Traceback", self.output)
-        self.assertIn(b"\x1b[?1000h\x1b[?1006h", self.output)
+        if self.zellij:
+            self.assertNotRegex(
+                self.output,
+                rb"\x1b\[\?(?:\d+;)*(?:1000|1002|1003)(?:;\d+)*h",
+                "Mouse capture prevents Zellij's pane-local selection",
+            )
+        else:
+            self.assertIn(b"\x1b[?1000h\x1b[?1006h", self.output)
         self.assertIn(b"\x1b[?1000l\x1b[?1006l", self.output)
         self.assertIn(b"\x1b[2J", self.output.split(b"\x1b[?1049l")[-1])
         modes = termios.tcgetattr(self.slave)
@@ -138,6 +152,8 @@ class TerminalTests(unittest.TestCase):
         self.finish(0)
 
     def test_wheel_momentum_cannot_undo_keyboard_reverse_at_boundaries(self):
+        if self.zellij:
+            self.skipTest("Zellij owns mouse reports and forwards scrolling as arrows")
         self.stop()
         termios.tcsetattr(self.slave, termios.TCSANOW, self.original_modes)
         read_fd, write_fd = os.pipe()
@@ -164,7 +180,7 @@ asdu.tui(entries, 'cwd', 'name', Path('/fictional'), True, lambda _: entries)
             stdout=self.slave,
             stderr=self.slave,
             pass_fds=(write_fd,),
-            env=dict(os.environ, TERM="xterm-256color"),
+            env=dict(os.environ, TERM="xterm-256color", ZELLIJ="1" if self.zellij else ""),
         )
         self.wait_for(b"help")
 
@@ -196,3 +212,9 @@ asdu.tui(entries, 'cwd', 'name', Path('/fictional'), True, lambda _: entries)
             self.assertEqual(positions(0.05)[-1], expected)
         os.write(self.master, b"q")
         self.finish(0)
+
+
+class ZellijTerminalTests(TerminalTests):
+    """The inner app must leave mouse ownership with the pane manager."""
+
+    zellij = True
