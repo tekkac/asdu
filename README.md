@@ -11,91 +11,97 @@
             agent session disk usage
 ```
 
-`asdu` is a terminal browser for Codex, Claude, and OMP sessions, inspired by ncdu.
-OMP support is read-only: browse, tags, trees, and conversation briefs.
-Find large conversations, see what they were about, and use reviewed actions for
-their source.
-Everything runs locally.
+`asdu` shows how much disk space your Codex, Claude, and OMP sessions use.
+Browse by tag, folder, source, or session type. Open a brief to review a
+conversation. See how to resume it. Archive or remove supported sessions.
+
+`asdu` reads local session files. It does not send their contents anywhere.
 
 ## Install
 
-Requires [uv](https://docs.astral.sh/uv/), Python 3.11+, and a POSIX terminal
-(Linux or macOS). This private repository requires GitHub SSH access.
+Install with [uv](https://docs.astral.sh/uv/):
 
 ```sh
-uv tool install 'git+ssh://git@github.com/tekkac/asdu.git'
+uv tool install 'git+https://github.com/tekkac/asdu.git'
 asdu
 ```
 
-Run `asdu` from a project folder to browse its sessions. To browse across
-your home directory and use conversation text for tagging:
+Update an existing installation:
+
+```sh
+uv tool install --force 'git+https://github.com/tekkac/asdu.git'
+```
+
+## Use
+
+Run `asdu` inside a project to see its sessions.
+
+```sh
+asdu
+```
+
+Show sessions stored under your home directory and use message text for tags:
 
 ```sh
 asdu --project ~/ --content-keywords
 ```
 
-- `--project ~/` includes sessions under your home directory. Replace it with
-  any project folder.
-- `--content-keywords` also checks user messages for tag keywords.
-  The initial scan takes longer and shows progress.
+`--project` limits results to sessions whose working directory is inside that
+folder. `--content-keywords` also checks user messages when assigning tags.
+The first scan can take longer.
 
-Re-run the install command with `--force` to update.
+Use the arrow keys to move. Press `Enter` to open and `Backspace` to return.
 
-## Browse and review
+- `g` changes the grouping.
+- `f` filters by source.
+- `s` changes the sort order.
+- `Ctrl-F` or `/` finds text. Use `n` and `N` for the next or previous match.
+- `t` shows session trees. Use `Space` to fold a branch.
+- `a` opens session actions.
+- `r` rescans.
+- `q` quits.
 
-Use the arrow keys to navigate, `Enter` to open, and `Backspace` to go back.
+Press `?` for every key. Run `asdu --help` for command-line options.
 
-Tags are the opening screen. They use fixed keyword and folder rules, so adding
-unrelated sessions won't change a conversation's tags. Unmatched sessions stay
-untagged. The first matching tag determines its group; the brief shows all matches.
-Use [custom rules](asdu.toml.example) with `--config` to replace the defaults.
-Native session names take precedence over goal- and request-based fallback titles.
-
-- `g` cycles folder, tag, source, and session-type groups.
-- `f` cycles source filters; `s` cycles sort orders.
-- `Ctrl-F` searches (`/` also works), with `n` and `N` for matches.
-- `t` shows recorded child and fork relationships; `Space` folds a branch.
-- `r` rescans; `q` quits. `Ctrl-C` exits and clears the screen.
-
-Use `?` for all keys and `asdu --help` for command-line options.
-Sizes refer to saved conversations, not your project files.
-
-Fictional sessions, shown without terminal colors:
+## Session list
 
 ```text
- asdu  .
+ asdu  .                                                               size↓
 
-     1.0 GiB  ████████████      8  /make-the-tests-green
-   512.0 MiB  ██████░░░░░░      4  /one-small-css-change
+     1.0 GiB  ████████████      8  /research
+   512.0 MiB  ██████░░░░░░      4  /web-app
 
 ›   64.0 MiB  codex   main      1d ago  ▾ Fix one flaky test (+2)
     16.0 MiB  codex   child     1d ago    ├─ Find the race condition
      8.0 MiB  codex   child     1d ago    └─ Remove the lucky sleep
-    18.2 MiB  claude  main      2h ago  Center a div without changing physics
-     9.7 KiB  omp     main     29d ago  hello?
+    18.2 MiB  claude  main      2h ago  Center the login form
+     9.7 KiB  omp     main     29d ago  Check the build
 
  Transcripts: 1.6 GiB  16 sessions
  Enter open  g group  f filter  s sort  Ctrl-F find  t tree  a action  ? help
 ```
 
-Open a conversation with `Enter`:
+Sizes refer to saved conversations, not project files.
+
+## Session brief
+
+Press `Enter` on a session:
 
 ```text
- Center a div without changing the laws of physics
+ Center the login form
 
 18.2 MiB  claude main  2h ago
-Folder: /demo/one-small-css-change
+Folder: /demo/web-app
 24 messages across 384 events; 0 compactions.
 
 ╭ Latest request
 │ Why did the login page disappear?
 │
 ├ Last reply
-│ The button is centered. I have restored the login page
-│ and removed the unnecessary Kubernetes deployment.
+│ The login page is back and the form is centered.
 │
 ├ First request
-│ Move the button two pixels to the left.
+│ Move the form two pixels to the left.
 ╰
 
 ID: demo-css-001
@@ -103,58 +109,34 @@ Tags: development
 Resume: claude --resume demo-css-001
 ```
 
-Briefs show recent excerpts first while full counts load in the background.
-They show source-native resume commands when available. A live Claude background
-session also shows its state and the corresponding Attach, Logs, Stop, and Remove
-commands. asdu displays these runtime commands but does not execute them.
-Briefs also show the provider and latest model when the source records them.
+The brief shows the folder, tags, session ID, recent messages, and a resume
+command when available. It may also show the model or live-session commands.
+`asdu` displays these commands but does not run them.
 
-## Clean up
+## Session actions
 
-Browsing changes nothing. Select a session and press `a` to choose:
+Browsing does not change any files. Select a session and press `a` to see its
+available actions.
 
-- **Codex:** Archive and Unarchive use the installed `codex` command. Archived
-  sessions remain on disk and appear as `arch`. Delete uses Codex too and is
-  permanent, so asdu always asks for confirmation.
-- **Claude:** Archive replaces the transcript with a compressed copy under
-  `~/.local/share/asdu/archive/` (or your XDG data directory). Trash moves the
-  transcript to your system Trash, where it can be restored.
-- **OMP:** read-only. OMP deletion also owns session artifacts and has no
-  targeted non-interactive command for asdu to call safely.
+- Codex sessions can be archived, restored, or deleted through Codex.
+- Claude sessions can be compressed into an archive or moved to Trash.
+- `asdu` does not modify OMP sessions.
 
-asdu keeps a local log of these actions.
-Close Claude sessions before archiving or moving them to Trash.
+Deleting a Codex session is permanent and always requires confirmation. Close
+a Claude session before archiving it or moving it to Trash.
 
 ## Contributing
 
-Bug reports, UI improvements, and support for other agents are welcome.
-Keep changes small and use fictional sessions in tests.
-Keep normal browsing cache-free; justify additional caching with measurements.
-
-Source adapters and their dispatch live in `asdu_sources/`. Shared transcript and
-storage primitives live in `asdu_sessions.py`, grouping and navigation state in
-`asdu_browser.py`, and terminal rendering and keys in `asdu.py`. Add adapters to
-the explicit registry; new sources are read-only unless their storage actions
-have been reviewed.
-
-From a checkout, run `uv run asdu.py` to try the app. Run the tests with:
+Bug reports, UI improvements, and new session sources are welcome. Keep changes
+small. Use fictional session data in tests.
 
 ```sh
+uv run asdu.py
 python3 -m unittest discover -s tests
 ```
 
-Test a fresh wheel on Debian with Python 3.11:
-
-```sh
-docker build -f tests/Dockerfile -t asdu-smoke .
-docker run --rm --network none asdu-smoke
-```
-
-This runs unit and PTY tests and checks installation, discovery, briefs, trees,
-native Codex action wiring, and Claude archive/Trash recovery using disposable
-fixtures. No host folders are mounted.
-The PTY tests cover startup, resize, Ctrl-C cleanup, and delayed terminal replies.
-Touchpad scrolling and visual rendering still need a real-terminal check.
+New sources should start without file-changing actions. Add those actions only
+after the source provides a safe way to perform them.
 
 ## License
 
