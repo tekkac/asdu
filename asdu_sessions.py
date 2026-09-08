@@ -7,7 +7,6 @@ import io
 import json
 import os
 import re
-import shlex
 import shutil
 import tempfile
 import tomllib
@@ -116,6 +115,8 @@ class Session:
     tags: tuple[str, ...]
     task_path: str = ""
     forked_from: str = ""
+    archived: bool = False
+    source_home: str = ""
 
     @property
     def key(self) -> tuple[str, str]:
@@ -126,11 +127,29 @@ class Session:
         """Opaque browser identity; distinct files may share a native session ID."""
         return f"{self.source}:{self.path}"
 
-    @property
-    def actions(self) -> frozenset[str]:
-        from asdu_sources import ACTIONS
 
-        return ACTIONS.get(self.source, frozenset())
+@dataclass(frozen=True)
+class SessionCommand:
+    """One source-native command relevant to a stored session."""
+
+    label: str
+    argv: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class SessionControls:
+    """Lazy runtime state and native commands for one stored session."""
+
+    commands: tuple[SessionCommand, ...] = ()
+    runtime_id: str = ""
+    runtime_kind: str = ""
+    runtime_state: str = ""
+
+
+@dataclass(frozen=True)
+class ActionResult:
+    destination: Path | None = None
+    replacement: Session | None = None
 
 
 class ContentCache:
@@ -273,9 +292,9 @@ def iter_jsonl(
 
 
 def untitled_title(first_request: str) -> str:
-    """Label a generated preview without pretending the session was titled."""
+    """Label a generated preview, or use a compact unknown marker."""
     if first_request == "untitled":
-        return first_request
+        return "?"
     return f"untitled — {first_request[:1024]}"
 
 
@@ -309,12 +328,6 @@ def message_texts(payload: dict) -> list[str]:
     return texts
 
 
-def assistant_texts(source: str, item: dict) -> list[str]:
-    from asdu_sources import READERS
-
-    return READERS[source].assistant_texts(item)
-
-
 def is_real_user_text(text: str) -> bool:
     lowered = text.lower()
     ignored = (
@@ -327,7 +340,7 @@ def is_real_user_text(text: str) -> bool:
         "by default, the user will only see",
         "respond directly to the user's prompt",
     )
-    return len(text) >= 12 and not lowered.startswith(ignored)
+    return bool(text) and not lowered.startswith(ignored)
 
 
 def substantive_user_text(text: str) -> str:
@@ -357,31 +370,14 @@ def preview_transcript(path: Path) -> io.StringIO:
     return io.StringIO((head + b"\n" + b"".join(tail)).decode("utf-8", "replace"))
 
 
-def resume_command(session: Session) -> str | None:
-    """Return a copyable native resume command; never launch another agent."""
-    command = {"codex": "codex resume", "claude": "claude --resume"}.get(session.source)
-    if command is None:
-        return None
-    return f"{command} {shlex.quote(session.session_id)}"
-
-
-def user_texts(source: str, item: dict) -> Iterable[str]:
-    from asdu_sources import READERS
-
-    return READERS[source].user_texts(item)
-
-
 def transcript_keywords(
     path: Path,
-    source: str,
+    read_users: Callable[[dict], Iterable[str]],
+    clean_user_text: Callable[[str], str],
     keywords: set[str],
     report_bytes: Callable[[int], None] | None = None,
 ) -> set[str]:
     """Mine only source-recognized user messages, streaming one JSONL file."""
-    from asdu_sources import READERS
-
-    read_users = READERS[source].user_texts
-    clean_user_text = READERS[source].clean_user_text
     remaining = {keyword.casefold() for keyword in keywords if keyword}
     found: set[str] = set()
     if not remaining:
@@ -418,6 +414,8 @@ def transcript_keywords(
 def cached_transcript_keywords(
     path: Path,
     source: str,
+    read_users: Callable[[dict], Iterable[str]],
+    clean_user_text: Callable[[str], str],
     keywords: set[str],
     cache: ContentCache,
     report_bytes: Callable[[int], None] | None = None,
@@ -425,7 +423,9 @@ def cached_transcript_keywords(
     cached = cache.get(path, source, keywords)
     if cached is not None:
         return cached
-    matches = transcript_keywords(path, source, keywords, report_bytes)
+    matches = transcript_keywords(
+        path, read_users, clean_user_text, keywords, report_bytes
+    )
     cache.put(path, source, keywords, matches)
     return matches
 
@@ -459,6 +459,8 @@ def scan_paths(
     progress: ScanReporter,
     cache: ContentCache,
     scope: Path | None,
+    read_users: Callable[[dict], Iterable[str]] | None = None,
+    clean_user_text: Callable[[str], str] | None = None,
 ) -> list[Session]:
     """Apply the same scope, cache, progress, and classification rules to every source."""
     discovered = list(paths)
@@ -484,10 +486,15 @@ def scan_paths(
                 progress.skipped.add(path)
             progress.update(label, index, len(discovered), done_bytes, total_bytes)
             continue
-        matches = (
-            cached_transcript_keywords(
+        if content_keywords and (read_users is None or clean_user_text is None):
+            raise ValueError("content keyword scanning requires a source reader")
+        if content_keywords:
+            assert read_users is not None and clean_user_text is not None
+            matches = cached_transcript_keywords(
                 path,
                 source,
+                read_users,
+                clean_user_text,
                 keywords,
                 cache,
                 lambda scanned: progress.update(
@@ -498,55 +505,10 @@ def scan_paths(
                     total_bytes,
                 ),
             )
-            if content_keywords
-            else set()
-        )
+        else:
+            matches = set()
         sessions.append(replace(session, tags=classify(session, rules, matches)))
         progress.update(label, index, len(discovered), done_bytes, total_bytes)
-    return sessions
-
-
-@dataclass(frozen=True)
-class SourceAdapter:
-    """One local transcript format and the reader that understands it."""
-
-    root: Path
-    scan: Callable[..., list[Session]]
-
-
-def source_adapters(
-    codex_root: Path, claude_root: Path, omp_root: Path | None = None
-) -> dict[str, SourceAdapter]:
-    from asdu_sources import READERS
-
-    roots = {"codex": codex_root, "claude": claude_root}
-    if omp_root is not None:
-        roots["omp"] = omp_root
-    return {
-        name: SourceAdapter(root, READERS[name].discover)
-        for name, root in roots.items()
-    }
-
-
-def scan(
-    sources: tuple[str, ...],
-    adapters: dict[str, SourceAdapter],
-    rules: list[TagRule],
-    content_keywords: bool,
-    progress: ScanReporter,
-    cache: ContentCache,
-    scope: Path | None,
-) -> list[Session]:
-    sessions: list[Session] = []
-    for source in sources:
-        adapter = adapters[source]
-        if adapter.root.exists():
-            sessions.extend(
-                adapter.scan(
-                    adapter.root, rules, content_keywords, progress, cache, scope
-                )
-            )
-    cache.save()
     return sessions
 
 
@@ -581,22 +543,15 @@ def require_unchanged(session: Session) -> None:
         raise OSError("session changed since scan; rescan before acting")
 
 
-def require_action(session: Session, action: str) -> None:
-    if action not in session.actions:
-        raise OSError(f"{session.source} sessions are read-only for {action}")
-
-
 def trash_session(session: Session) -> None:
-    require_action(session, "trash")
     require_unchanged(session)
     move_to_trash(session.path)
 
 
 def archive_session(session: Session) -> Path:
-    """Compress a transcript into a dated, user-owned archive and remove it."""
+    """Compress one transcript into a user-owned archive and remove it."""
     day = datetime.now().astimezone().strftime("%Y-%m-%d")
     data_home = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
-    require_action(session, "archive")
     directory = data_home / "asdu" / "archive" / day / session.source
     directory.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix="session-", suffix=".jsonl.gz", dir=directory)
@@ -649,42 +604,39 @@ def record_action(
         output.write(json.dumps(event, separators=(",", ":")) + "\n")
 
 
-def delete_settings_path() -> Path:
+def settings_path() -> Path:
     config_home = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
     return config_home / "asdu" / "settings.json"
 
 
-def skip_delete_confirmation() -> bool:
+def skip_trash_confirmation() -> bool:
     try:
-        with delete_settings_path().open(encoding="utf-8") as handle:
-            return bool(json.load(handle).get("skip_delete_confirmation"))
+        with settings_path().open(encoding="utf-8") as handle:
+            return bool(json.load(handle).get("skip_trash_confirmation"))
     except (OSError, json.JSONDecodeError, AttributeError):
         return False
 
 
-def disable_delete_confirmation() -> None:
+def disable_trash_confirmation() -> None:
     try:
-        path = delete_settings_path()
+        path = settings_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", encoding="utf-8") as handle:
-            json.dump({"skip_delete_confirmation": True}, handle)
+            json.dump({"skip_trash_confirmation": True}, handle)
     except OSError:
         pass
 
 
-def read_brief(session: Session, poll=None, preview: bool = False) -> BriefData:
-    from asdu_sources import READERS
-
-    return READERS[session.source].load_brief(session, poll, preview)
-
-
 def read_jsonl_brief(
-    session: Session, poll=None, preview=False, enrich=None
+    session: Session,
+    read_users: Callable[[dict], Iterable[str]],
+    read_assistant: Callable[[dict], Iterable[str]],
+    clean_user_text: Callable[[str], str],
+    poll=None,
+    preview=False,
+    enrich=None,
 ) -> BriefData:
     """Shared streaming and preview mechanics; formats belong to source readers."""
-    from asdu_sources import READERS
-
-    reader = READERS[session.source]
     data = BriefData(
         None, None, None, None, Counter(), [], session.task_path, session.forked_from
     )
@@ -705,11 +657,11 @@ def read_jsonl_brief(
             data.event_counts[str(item.get("type", "unknown"))] += 1
             if enrich is not None:
                 enrich(item, data)
-            for text in reader.user_texts(item):
-                clean = reader.clean_user_text(text)
+            for text in read_users(item):
+                clean = clean_user_text(text)
                 if clean:
                     data.first_user = data.first_user or clean
                     data.latest_user = clean
-            for text in reader.assistant_texts(item):
+            for text in read_assistant(item):
                 data.latest_reply = text
     return data

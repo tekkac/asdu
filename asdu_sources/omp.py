@@ -1,9 +1,12 @@
 """Read-only OMP JSONL sessions. Message parentId is not a session parent."""
 
 from dataclasses import replace
+from pathlib import Path
 
 from asdu_sessions import (
     Session,
+    SessionCommand,
+    SessionControls,
     content_text,
     iter_jsonl,
     message_texts,
@@ -11,6 +14,16 @@ from asdu_sessions import (
     scan_paths,
     untitled_title,
 )
+
+
+def available_actions(_session: Session) -> frozenset[str]:
+    return frozenset()
+
+
+def session_controls(session: Session) -> SessionControls:
+    return SessionControls(
+        (SessionCommand("Resume", ("omp", "--resume", session.session_id)),)
+    )
 
 
 def user_texts(item):
@@ -69,6 +82,7 @@ def discover(root, rules, content_keywords, progress, cache, scope):
             if index >= 31 and metadata and (title or first):
                 break
         identifier, cwd = metadata.get("id"), metadata.get("cwd")
+        parent = metadata.get("parentSession")
         if not isinstance(identifier, str) or not identifier:
             return None
         try:
@@ -83,7 +97,7 @@ def discover(root, rules, content_keywords, progress, cache, scope):
             origin,
             cwd if isinstance(cwd, str) else "(unknown)",
             identifier,
-            None,
+            parent if isinstance(parent, str) and parent else None,
             title
             or untitled_title(first or (f"reply: {reply}" if reply else "untitled")),
             (),
@@ -99,6 +113,8 @@ def discover(root, rules, content_keywords, progress, cache, scope):
         progress,
         cache,
         scope,
+        user_texts,
+        clean_user_text,
     )
     return link_children(sessions)
 
@@ -106,6 +122,12 @@ def discover(root, rules, content_keywords, progress, cache, scope):
 def link_children(sessions):
     """Match successful task progress IDs, not titles or directory ancestry."""
     by_path = {entry.path: entry for entry in sessions}
+    by_id = {entry.session_id: entry for entry in sessions}
+    path_ids = {
+        value: entry.session_id
+        for entry in sessions
+        for value in (str(entry.path), str(entry.path.resolve()))
+    }
     parents = {}
     for entry in sessions:
         artifacts = (
@@ -141,12 +163,20 @@ def link_children(sessions):
                     and child.key != entry.key
                 ):
                     parents.setdefault(child.storage_key, set()).add(entry.session_id)
-    return [
-        replace(entry, parent_id=next(iter(parents[entry.storage_key])))
-        if len(parents.get(entry.storage_key, ())) == 1
-        else entry
-        for entry in sessions
-    ]
+    result = []
+    for entry in sessions:
+        recorded = entry.parent_id
+        if recorded in by_id:
+            parent_id = recorded
+        elif recorded:
+            parent_id = path_ids.get(str(Path(recorded).expanduser()))
+        else:
+            parent_id = None
+        inferred = parents.get(entry.storage_key, ())
+        if len(inferred) == 1:
+            parent_id = next(iter(inferred))
+        result.append(replace(entry, parent_id=parent_id))
+    return result
 
 
 def enrich_brief(item, data):
@@ -169,4 +199,12 @@ def enrich_brief(item, data):
 
 
 def load_brief(session, poll=None, preview=False):
-    return read_jsonl_brief(session, poll, preview, enrich_brief)
+    return read_jsonl_brief(
+        session,
+        user_texts,
+        assistant_texts,
+        clean_user_text,
+        poll,
+        preview,
+        enrich_brief,
+    )

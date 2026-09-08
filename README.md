@@ -13,7 +13,8 @@
 
 `asdu` is a terminal browser for Codex, Claude, and OMP sessions, inspired by ncdu.
 OMP support is read-only: browse, tags, trees, and conversation briefs.
-Find large conversations, see what they were about, and archive or trash them.
+Find large conversations, see what they were about, and use reviewed actions for
+their source.
 Everything runs locally.
 
 ## Install
@@ -48,10 +49,12 @@ Tags are the opening screen. They use fixed keyword and folder rules, so adding
 unrelated sessions won't change a conversation's tags. Unmatched sessions stay
 untagged. The first matching tag determines its group; the brief shows all matches.
 Use [custom rules](asdu.toml.example) with `--config` to replace the defaults.
+Native session names take precedence over goal- and request-based fallback titles.
 
-- `g` groups by folder, tag, source, or session type; `f` filters by source.
-- `s` sorts; `/` searches, with `n` and `N` for matches.
-- `t` shows conversation trees; `Space` folds a branch.
+- `g` cycles folder, tag, source, and session-type groups.
+- `f` cycles source filters; `s` cycles sort orders.
+- `Ctrl-F` searches (`/` also works), with `n` and `N` for matches.
+- `t` shows recorded child and fork relationships; `Space` folds a branch.
 - `r` rescans; `q` quits. `Ctrl-C` exits and clears the screen.
 
 Use `?` for all keys and `asdu --help` for command-line options.
@@ -72,7 +75,7 @@ Fictional sessions, shown without terminal colors:
      9.7 KiB  omp     main     29d ago  hello?
 
  Transcripts: 1.6 GiB  16 sessions
- Enter open  g group  f filter  s sort  t tree  a action  ? help
+ Enter open  g group  f filter  s sort  Ctrl-F find  t tree  a action  ? help
 ```
 
 Open a conversation with `Enter`:
@@ -101,21 +104,26 @@ Resume: claude --resume demo-css-001
 ```
 
 Briefs show recent excerpts first while full counts load in the background.
-OMP briefs also identify the provider and latest model used. Resume commands are
-shown when the source supports them.
+They show source-native resume commands when available. A live Claude background
+session also shows its state and the corresponding Attach, Logs, Stop, and Remove
+commands. asdu displays these runtime commands but does not execute them.
+Briefs also show the provider and latest model when the source records them.
 
 ## Clean up
 
 Browsing changes nothing. Select a session and press `a` to choose:
 
-- **Archive** replaces the saved conversation with a compressed copy.
-  Archives are saved in `~/.local/share/asdu/archive/`
-  (or your XDG data directory). Decompress and restore the file to its original
-  location before resuming it; asdu has no archive browser.
-- **Trash** moves it to your system Trash, where you can restore it.
+- **Codex:** Archive and Unarchive use the installed `codex` command. Archived
+  sessions remain on disk and appear as `arch`. Delete uses Codex too and is
+  permanent, so asdu always asks for confirmation.
+- **Claude:** Archive replaces the transcript with a compressed copy under
+  `~/.local/share/asdu/archive/` (or your XDG data directory). Trash moves the
+  transcript to your system Trash, where it can be restored.
+- **OMP:** read-only. OMP deletion also owns session artifacts and has no
+  targeted non-interactive command for asdu to call safely.
 
 asdu keeps a local log of these actions.
-Close sessions in their original app before archiving or trashing them.
+Close Claude sessions before archiving or moving them to Trash.
 
 ## Contributing
 
@@ -123,10 +131,11 @@ Bug reports, UI improvements, and support for other agents are welcome.
 Keep changes small and use fictional sessions in tests.
 Keep normal browsing cache-free; justify additional caching with measurements.
 
-Source readers live in `asdu_sources/`. Shared scanning and file actions live in
-`asdu_sessions.py`, grouping and trees in `asdu_browser.py`, and the terminal UI
-in `asdu.py`. Add readers to the explicit registry; new sources are read-only
-unless their storage actions have been reviewed.
+Source adapters and their dispatch live in `asdu_sources/`. Shared transcript and
+storage primitives live in `asdu_sessions.py`, grouping and navigation state in
+`asdu_browser.py`, and terminal rendering and keys in `asdu.py`. Add adapters to
+the explicit registry; new sources are read-only unless their storage actions
+have been reviewed.
 
 From a checkout, run `uv run asdu.py` to try the app. Run the tests with:
 
@@ -142,7 +151,8 @@ docker run --rm --network none asdu-smoke
 ```
 
 This runs unit and PTY tests and checks installation, discovery, briefs, trees,
-and archive/Trash recovery using disposable fixtures. No host folders are mounted.
+native Codex action wiring, and Claude archive/Trash recovery using disposable
+fixtures. No host folders are mounted.
 The PTY tests cover startup, resize, Ctrl-C cleanup, and delayed terminal replies.
 Touchpad scrolling and visual rendering still need a real-terminal check.
 

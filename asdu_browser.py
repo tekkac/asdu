@@ -147,6 +147,11 @@ def row_id(entry: Session) -> str:
     return entry.storage_key
 
 
+def lineage_parent(entry: Session) -> str | None:
+    """Prefer execution ancestry, then a recorded conversation fork."""
+    return entry.parent_id or entry.forked_from or None
+
+
 def parent_links(entries: Iterable[Session]) -> dict[str, str]:
     entries = list(entries)
     candidates: dict[tuple[str, str], list[Session]] = defaultdict(list)
@@ -154,7 +159,7 @@ def parent_links(entries: Iterable[Session]) -> dict[str, str]:
         candidates[entry.key].append(entry)
     links = {}
     for entry in entries:
-        parents = candidates.get((entry.source, entry.parent_id), [])
+        parents = candidates.get((entry.source, lineage_parent(entry)), [])
         if len(parents) == 1 and row_id(parents[0]) != row_id(entry):
             links[row_id(entry)] = row_id(parents[0])
     for start in list(links):
@@ -253,9 +258,10 @@ def tree_with_ancestors(
     pending = list(entries)
     while pending:
         entry = pending.pop()
-        if not entry.parent_id:
+        parent_id = lineage_parent(entry)
+        if not parent_id:
             continue
-        parent = known.get((entry.source, entry.parent_id))
+        parent = known.get((entry.source, parent_id))
         key = parent.storage_key if parent else None
         if parent is not None and key not in result:
             result[key] = parent

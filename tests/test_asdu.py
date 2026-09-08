@@ -14,6 +14,7 @@ import unittest
 from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 SCRIPT = Path(__file__).parents[1] / "asdu.py"
@@ -26,7 +27,15 @@ sys.path.insert(0, str(SCRIPT.parent))
 SPEC.loader.exec_module(asdu)
 import asdu_browser as browser  # noqa: E402 - import from the source checkout
 import asdu_sessions as transcripts  # noqa: E402
-from asdu_sources import claude, codex  # noqa: E402
+from asdu_sources import (  # noqa: E402
+    READERS,
+    claude,
+    codex,
+    perform_session_action,
+    read_brief,
+    session_controls,
+    transcript_keywords,
+)
 
 
 def session(identifier: str, parent: str | None = None) -> object:
@@ -82,9 +91,7 @@ class Screen:
         )
 
 
-def browse_screen(
-    entries, keys, mode="cwd", sort="name", notice=lambda: "", rescan=None
-):
+def browse_screen(entries, keys, mode="cwd", sort="name", rescan=None):
     screen = Screen(keys)
     with ExitStack() as stack:
         for name in ("curs_set", "mousemask", "mouseinterval"):
@@ -101,7 +108,6 @@ def browse_screen(
             Path("/project"),
             True,
             rescan or (lambda _: entries),
-            notice,
         )
     return screen
 
@@ -140,18 +146,29 @@ class AsduTests(unittest.TestCase):
             session("codex-task"),
             replace(session("claude-task"), source="claude"),
         ]
-        with patch.object(asdu, "choose", return_value="claude"):
-            screen = browse_screen(entries, [ord("f"), ord("q")])
+        screen = browse_screen(entries, [ord("f"), ord("q")])
         text = " ".join(item[2] for item in screen.frames[-1])
         self.assertIn("claude-task", text)
         self.assertNotIn("codex-task", text)
 
+    def test_group_key_cycles_without_opening_another_screen(self):
+        screen = browse_screen([session("task")], [ord("g"), ord("q")], mode="tag")
+        header = " ".join(text for row, _, text, _ in screen.frames[-1] if row == 0)
+        self.assertIn("sources", header)
+
     def test_archive_invalidates_current_view(self):
-        entries = [session("archived"), session("remaining")]
+        entries = [
+            replace(session("archived"), source="claude"),
+            session("remaining"),
+        ]
         with (
             patch.object(asdu, "confirm_session_action", return_value="archive"),
             patch.object(
-                asdu, "archive_session", return_value=Path("/fictional-archive")
+                asdu,
+                "perform_session_action",
+                return_value=transcripts.ActionResult(
+                    destination=Path("/fictional-archive")
+                ),
             ),
             patch.object(asdu, "record_action"),
         ):
@@ -159,6 +176,25 @@ class AsduTests(unittest.TestCase):
         text = " ".join(item[2] for item in screen.frames[-1])
         self.assertIn("remaining", text)
         self.assertNotIn("archived", text)
+
+    def test_native_archive_keeps_session_in_disk_totals(self):
+        entry = session("native")
+        archived = replace(entry, archived=True, path=Path("/archive/native.jsonl"))
+        entries = [entry]
+        with (
+            patch.object(asdu, "confirm_session_action", return_value="archive"),
+            patch.object(
+                asdu,
+                "perform_session_action",
+                return_value=transcripts.ActionResult(replacement=archived),
+            ),
+            patch.object(asdu, "record_action"),
+        ):
+            screen = browse_screen(entries, [ord("a"), ord("q")])
+        text = " ".join(item[2] for item in screen.frames[-1])
+        self.assertIn("native", text)
+        self.assertIn("arch", text)
+        self.assertEqual(entries, [archived])
 
     def test_no_color_flag_and_environment_skip_color_initialization(self):
         for flag, value in ((True, ""), (False, "1")):
@@ -224,9 +260,7 @@ class AsduTests(unittest.TestCase):
 
     def test_brief_provenance_uses_commas(self):
         entry = replace(session("demo"), path=FIXTURES / "rollout-codex.jsonl")
-        data = replace(
-            transcripts.read_brief(entry), recorded_via=["VS Code", "Codex Exec"]
-        )
+        data = replace(read_brief(entry), recorded_via=["VS Code", "Codex Exec"])
         with patch.object(asdu, "read_brief", return_value=data):
             brief = asdu.read_digest(entry)
         self.assertIn("Recorded via: VS Code, Codex Exec", brief)
@@ -283,16 +317,13 @@ class AsduTests(unittest.TestCase):
             for role in ("assistant", "user", "tool"):
                 item = {"type": kind, field: {"role": role, "content": blocks}}
                 self.assertEqual(
-                    transcripts.assistant_texts(source, item),
+                    READERS[source].assistant_texts(item),
                     ["useful answer"] if role == "assistant" else [],
                 )
             for message in (None, [], "broken", {}):
-                self.assertEqual(
-                    transcripts.assistant_texts(source, {field: message}), []
-                )
+                self.assertEqual(READERS[source].assistant_texts({field: message}), [])
         self.assertEqual(
-            transcripts.assistant_texts(
-                "claude",
+            READERS["claude"].assistant_texts(
                 {"message": {"role": "assistant", "content": " plain\nreply "}},
             ),
             ["plain reply"],
@@ -339,9 +370,7 @@ class AsduTests(unittest.TestCase):
                 self.assertEqual(len(entries), 1)
                 entry = entries[0]
                 self.assertEqual(entry.title, "untitled — reply: Last useful reply")
-                self.assertEqual(
-                    transcripts.read_brief(entry).latest_reply, "Last useful reply"
-                )
+                self.assertEqual(read_brief(entry).latest_reply, "Last useful reply")
 
     def test_tags_are_rule_based_even_for_a_single_session(self):
         entry = replace(session("demo"), title="Please do a security audit")
@@ -386,7 +415,7 @@ class AsduTests(unittest.TestCase):
                 ):
                     with self.subTest(escaped=escaped, source=source):
                         path.write_text(json.dumps(item, ensure_ascii=escaped))
-                        found = transcripts.transcript_keywords(path, source, keywords)
+                        found = transcript_keywords(path, source, keywords)
                         self.assertEqual(found, keywords)
                         rules = [
                             transcripts.TagRule(word, keywords=(word,))
@@ -423,7 +452,11 @@ class AsduTests(unittest.TestCase):
             path.write_text("fictional transcript")
             stat = path.stat()
             entry = replace(
-                session("demo"), path=path, size=stat.st_size, modified=stat.st_mtime
+                session("demo"),
+                path=path,
+                size=stat.st_size,
+                modified=stat.st_mtime,
+                source="claude",
             )
             with (
                 patch.dict(asdu.os.environ, {"XDG_DATA_HOME": str(root)}),
@@ -579,12 +612,11 @@ class AsduTests(unittest.TestCase):
                 asdu.draw_line(screen, 5, "dialog", selected=True)
                 self.assertTrue(screen.frame[-1][2].startswith("dialog"))
 
-    def test_selected_row_uses_accent_text_and_full_width(self):
+    def test_selected_row_is_inverted_and_full_width(self):
         screen = Screen([])
-        screen.selection_attr = 9 << 8
         asdu.draw_line(screen, 2, " row", selected=True, pointer=True)
         _, _, text, attr = screen.frame[-1]
-        self.assertEqual(attr, screen.selection_attr | asdu.curses.A_BOLD)
+        self.assertEqual(attr, asdu.curses.A_REVERSE | asdu.curses.A_BOLD)
         self.assertEqual(asdu.display_width(text), screen.width - 1)
         self.assertTrue(text.startswith("›"))
 
@@ -596,9 +628,8 @@ class AsduTests(unittest.TestCase):
         self.assertEqual(screen.frame[2][3], 2 << 8)
         self.assertEqual(screen.frame[3][3], asdu.curses.A_DIM)
         self.assertIn(asdu.session_date(session("demo")), screen.frame[3][2])
-        screen.selection_attr = 9 << 8
         asdu.draw_session_line(screen, 3, session("demo"), True)
-        self.assertEqual(screen.frame[-1][3], screen.selection_attr | asdu.curses.A_DIM)
+        self.assertEqual(screen.frame[-1][3], asdu.curses.A_REVERSE | asdu.curses.A_DIM)
 
     def test_scan_reports_skips_without_counting_out_of_scope_sessions(self):
         for source in ("codex", "claude"):
@@ -629,11 +660,6 @@ class AsduTests(unittest.TestCase):
                 )
                 self.assertEqual([entry.session_id for entry in entries], ["valid"])
                 self.assertEqual(len(progress.skipped), 2)
-                self.assertEqual(
-                    progress.notice(),
-                    "2 files skipped; 2 files contain invalid records",
-                )
-                self.assertEqual(asdu.ScanProgress(False).notice(), "")
 
     def test_missing_file_is_skipped(self):
         progress = asdu.ScanProgress(False)
@@ -651,15 +677,6 @@ class AsduTests(unittest.TestCase):
         )
         self.assertEqual(entries, [])
         self.assertEqual(progress.skipped, {missing})
-
-    def test_scan_notice_survives_navigation(self):
-        screen = browse_screen(
-            [session("one"), session("two")],
-            [asdu.curses.KEY_DOWN, asdu.curses.KEY_UP, ord("q")],
-            notice=lambda: "2 files skipped",
-        )
-        for frame in screen.frames:
-            self.assertTrue(any("2 files skipped" in text for _, _, text, _ in frame))
 
     def test_nested_parent_and_guardian_metadata(self):
         source = {"subagent": {"thread_spawn": {"parent_thread_id": "parent"}}}
@@ -689,7 +706,7 @@ class AsduTests(unittest.TestCase):
             finished = asdu.threading.Event()
             polls = []
 
-            def load(entry, poll, preview):
+            def load(entry, poll, preview, controls=None):
                 self.assertEqual(len(screen.frames), 1)
                 self.assertTrue(
                     any(
@@ -888,32 +905,32 @@ class AsduTests(unittest.TestCase):
             self.assertEqual(codex.task_metadata(payload), ("", ""))
         self.assertEqual(transcripts.session_label(session("original")), "original")
 
-    def test_chooser_highlight_stays_inside_border(self):
-        for width in (38, 60, 100):
-            options = ["cwd", "tag", "source", "origin"]
-            screen = Screen([asdu.curses.KEY_DOWN, 10], width)
+    def test_small_settings_cycle_without_a_dialog(self):
+        self.assertEqual(asdu.cycle_value("cwd", ["cwd", "tag"]), "tag")
+        self.assertEqual(asdu.cycle_value("tag", ["cwd", "tag"]), "cwd")
+        self.assertEqual(asdu.cycle_value("missing", ["all", "codex"]), "all")
+
+    def test_source_roots_honor_native_config_environments(self):
+        with patch.dict(
+            asdu.os.environ,
+            {
+                "CODEX_HOME": "/fictional/codex-home",
+                "CLAUDE_CONFIG_DIR": "/fictional/claude-home",
+            },
+        ):
             self.assertEqual(
-                asdu.choose(screen, "Group sessions by", options, "cwd"), "tag"
+                asdu.default_codex_root(), Path("/fictional/codex-home/sessions")
             )
-            for frame in screen.frames:
-                highlights = [
-                    (column, text)
-                    for _, column, text, attr in frame
-                    if attr & asdu.curses.A_REVERSE
-                ]
-                self.assertEqual(len(highlights), 1)
-                column, text = highlights[0]
-                self.assertEqual(column, 1)
-                self.assertEqual(asdu.display_width(text), min(48, width - 3))
-                self.assertNotIn("│", text)
+            self.assertEqual(
+                asdu.default_claude_root(), Path("/fictional/claude-home/projects")
+            )
 
     def test_actions_and_confirmation_have_identical_keys_at_all_sizes(self):
         for width in (28, 40, 80):
+            claude = replace(session("example"), source="claude")
             for key, expected in (("a", "archive"), ("t", "trash"), ("q", None)):
                 screen = Screen([ord(key)], width)
-                self.assertEqual(
-                    asdu.confirm_session_action(screen, session("example")), expected
-                )
+                self.assertEqual(asdu.confirm_session_action(screen, claude), expected)
             for key, expected in (("y", "yes"), ("n", None), ("q", None)):
                 screen = Screen([ord(key)], width)
                 self.assertEqual(asdu.confirm_trash(screen), expected)
@@ -922,11 +939,24 @@ class AsduTests(unittest.TestCase):
                 )
             self.assertEqual(
                 asdu.confirm_session_action(
-                    Screen([asdu.curses.KEY_DOWN, 10], width), session("example")
+                    Screen([asdu.curses.KEY_DOWN, 10], width), claude
                 ),
                 "trash",
             )
             self.assertIsNone(asdu.confirm_trash(Screen([10], width)))
+
+            codex_active = session("codex-active")
+            self.assertEqual(
+                asdu.confirm_session_action(Screen([ord("d")], width), codex_active),
+                "delete",
+            )
+            codex_archived = replace(codex_active, archived=True)
+            self.assertEqual(
+                asdu.confirm_session_action(Screen([ord("u")], width), codex_archived),
+                "unarchive",
+            )
+            self.assertFalse(asdu.confirm_permanent_delete(Screen([10], width)))
+            self.assertTrue(asdu.confirm_permanent_delete(Screen([ord("y")], width)))
 
     def test_name_sort_uses_visible_titles_everywhere(self):
         apple = replace(session("a"), title="untitled — Apple")
@@ -969,8 +999,7 @@ class AsduTests(unittest.TestCase):
             ("cwd", [ord("s"), ord("q")]),
             ("tag", [10, ord("s"), ord("q")]),
         ):
-            with patch.object(asdu, "choose", return_value="size"):
-                screen = browse_screen(entries, keys, mode)
+            screen = browse_screen(entries, keys, mode)
             self.assertIn("a", screen.selected())
             self.assertNotIn("b", screen.selected())
 
@@ -1019,15 +1048,17 @@ class AsduTests(unittest.TestCase):
         self.assertTrue(any("parent" in text for _, _, text, _ in screen.frames[-1]))
 
     def test_brief_search_tracks_match_separately_from_scroll(self):
-        screen = Screen([ord("/"), ord("n"), ord("n"), ord("q")], height=8)
         body = "\n".join(
             ["hit start"] + ["filler"] * 18 + ["hit end one", "hit end two"]
         )
-        with patch.object(asdu, "search_prompt", return_value="hit"):
-            asdu.text_view(screen, "Title", body)
-        # First match is included; the two end matches share a viewport.
-        self.assertEqual(screen.frames[0], screen.frames[1])
-        self.assertEqual(screen.frames[2], screen.frames[3])
+        for search_key in (ord("/"), asdu.CTRL_F):
+            with self.subTest(search_key=search_key):
+                screen = Screen([search_key, ord("n"), ord("n"), ord("q")], height=8)
+                with patch.object(asdu, "search_prompt", return_value="hit"):
+                    asdu.text_view(screen, "Title", body)
+                # First match is included; the two end matches share a viewport.
+                self.assertEqual(screen.frames[0], screen.frames[1])
+                self.assertEqual(screen.frames[2], screen.frames[3])
 
     def test_cli_deduplicates_sources_and_rejects_old_root(self):
         args = [
@@ -1130,7 +1161,7 @@ class AsduTests(unittest.TestCase):
                 "\n".join(json.dumps(r, ensure_ascii=False) for r in records)
             )
             self.assertEqual(
-                transcripts.transcript_keywords(
+                transcript_keywords(
                     path, "codex", {"sql query", "c++", "café", "security audit"}
                 ),
                 {"sql query", "c++", "café"},
@@ -1291,6 +1322,7 @@ class AsduTests(unittest.TestCase):
                 path=path,
                 size=stat.st_size,
                 modified=stat.st_mtime,
+                source="claude",
             )
             with patch.object(
                 transcripts.shutil, "copyfileobj", side_effect=OSError("failed")
@@ -1306,6 +1338,30 @@ class AsduTests(unittest.TestCase):
             with transcripts.gzip.open(destination, "rt") as archived:
                 self.assertEqual(archived.read(), "original")
 
+    def test_codex_actions_delegate_to_native_cli(self) -> None:
+        active = replace(session("native"), source_home="/fictional/codex")
+        completed = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with patch.object(codex.subprocess, "run", return_value=completed) as run:
+            outcome = perform_session_action(active, "archive")
+            self.assertTrue(outcome.replacement.archived)
+            (command,) = run.call_args.args
+            self.assertEqual(command, ["codex", "archive", "native"])
+            self.assertEqual(
+                run.call_args.kwargs["env"]["CODEX_HOME"], "/fictional/codex"
+            )
+
+            archived = replace(active, archived=True)
+            outcome = perform_session_action(archived, "unarchive")
+            self.assertFalse(outcome.replacement.archived)
+            self.assertEqual(run.call_args.args[0], ["codex", "unarchive", "native"])
+            outcome = perform_session_action(active, "delete")
+            self.assertIsNone(outcome.replacement)
+            self.assertEqual(
+                run.call_args.args[0], ["codex", "delete", "--force", "native"]
+            )
+        with self.assertRaisesRegex(OSError, "read-only"):
+            perform_session_action(active, "trash")
+
     def test_search_wraps_and_preserves_position_on_miss(self) -> None:
         labels = ["Alpha", "Beta", "alphabet"]
         self.assertEqual(browser.find_match(labels, "ALPHA", 0), 2)
@@ -1317,6 +1373,12 @@ class AsduTests(unittest.TestCase):
                 for line in asdu.wrap_cells("│ ＡＢＣ long sentence", 8)
             )
         )
+
+    def test_ctrl_f_searches_the_session_list(self) -> None:
+        entries = [session("alpha"), session("beta")]
+        with patch.object(asdu, "search_prompt", return_value="beta"):
+            screen = browse_screen(entries, [6, ord("q")])
+        self.assertIn("beta", screen.selected())
 
     def test_navigation_replay_does_not_redraw_boundaries_or_reset_brief(self) -> None:
         class Window:
@@ -1369,7 +1431,6 @@ class AsduTests(unittest.TestCase):
             asdu.tui(entries, "cwd", "name", Path("/project"), True, lambda _: entries)
             original_window = window
             window = Window([10, asdu.curses.KEY_DOWN, ord("r"), ord("f"), ord("q")])
-            stack.enter_context(patch.object(asdu, "choose", return_value="codex"))
             refreshed = [session("earlier"), *entries]
             asdu.tui(
                 entries[:], "tag", "name", Path("/project"), True, lambda _: refreshed
@@ -1709,8 +1770,8 @@ class AsduTests(unittest.TestCase):
             self.assertIn("Resume: codex resume test", brief)
             self.assertTrue(brief.rstrip().endswith("Resume: codex resume test"))
 
-    def test_resume_command_is_source_specific(self) -> None:
-        codex = transcripts.Session(
+    def test_session_controls_are_source_specific(self) -> None:
+        codex_entry = transcripts.Session(
             Path("/x"),
             1,
             1.0,
@@ -1722,7 +1783,7 @@ class AsduTests(unittest.TestCase):
             "x",
             ("untagged",),
         )
-        claude = transcripts.Session(
+        claude_entry = transcripts.Session(
             Path("/x"),
             1,
             1.0,
@@ -1734,8 +1795,27 @@ class AsduTests(unittest.TestCase):
             "x",
             ("untagged",),
         )
-        self.assertEqual(transcripts.resume_command(codex), "codex resume 'one;two'")
-        self.assertEqual(transcripts.resume_command(claude), "claude --resume id")
+        self.assertEqual(
+            session_controls(codex_entry).commands[0].argv,
+            ("codex", "resume", "one;two"),
+        )
+        with patch.object(claude.subprocess, "run", side_effect=OSError):
+            self.assertEqual(
+                session_controls(claude_entry).commands[0].argv,
+                ("claude", "--resume", "id"),
+            )
+
+    def test_brief_formats_runtime_state_and_native_commands(self) -> None:
+        entry = replace(session("demo"), path=FIXTURES / "rollout-codex.jsonl")
+        controls = transcripts.SessionControls(
+            (transcripts.SessionCommand("Attach", ("claude", "attach", "short id")),),
+            runtime_id="short id",
+            runtime_kind="background",
+            runtime_state="blocked",
+        )
+        brief = asdu.read_digest(entry, controls=controls)
+        self.assertIn("Background: blocked (short id)", brief)
+        self.assertTrue(brief.rstrip().endswith("Attach: claude attach 'short id'"))
 
     def test_action_rejects_changed_transcript(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -50,7 +50,9 @@ class InstalledSmoke(unittest.TestCase):
                 progress = asdu.ScanProgress(False)
                 cache = transcripts.ContentCache(False)
                 entries = codex_reader.discover(codex, [], False, progress, cache, None)
-                entries += claude_reader.discover(claude, [], False, progress, cache, None)
+                entries += claude_reader.discover(
+                    claude, [], False, progress, cache, None
+                )
                 omp = root / "omp"
                 omp.mkdir()
                 shutil.copy(fixtures / "omp-test.jsonl", omp)
@@ -104,7 +106,7 @@ class InstalledSmoke(unittest.TestCase):
                 )
 
                 original = parent.path.read_bytes()
-                archived = transcripts.archive_session(parent)
+                archived = transcripts.archive_session(replace(parent, source="claude"))
                 self.assertFalse(parent.path.exists())
                 self.assertTrue(archived.is_relative_to(data))
                 with gzip.open(archived, "rb") as handle:

@@ -5,8 +5,8 @@
 # ///
 """Disk-oriented browser for local agent-session transcripts.
 
-Scanning and browsing are read-only.  Archive and Trash are deliberate,
-interactive actions for individual transcripts.
+Scanning and browsing are read-only. Session actions are deliberate and
+source-aware.
 """
 
 from __future__ import annotations
@@ -15,12 +15,14 @@ import argparse
 import curses
 import os
 import re
+import shlex
 import sys
 import threading
 import time
 import tomllib
 import unicodedata
 from collections import defaultdict
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -46,21 +48,24 @@ from asdu_browser import (
     tree_rows,
     tree_with_ancestors,
 )
+from asdu_sources import (
+    available_actions,
+    perform_session_action,
+    read_brief,
+    scan,
+    session_controls,
+    source_adapters,
+)
 from asdu_sessions import (
     ContentCache,
     Session,
-    archive_session,
-    disable_delete_confirmation,
+    SessionControls,
+    disable_trash_confirmation,
     in_scope,
     load_tag_rules,
-    read_brief,
     record_action,
-    resume_command,
-    scan,
     session_label,
-    skip_delete_confirmation,
-    source_adapters,
-    trash_session,
+    skip_trash_confirmation,
 )
 
 ASCII_UI = False
@@ -149,15 +154,6 @@ class ScanProgress:
     def finish(self) -> None:
         if self.interactive:
             sys.stderr.flush()
-
-    def notice(self) -> str:
-        parts = []
-        if self.skipped:
-            parts.append(f"{len(self.skipped)} files skipped")
-        if damaged := self.invalid - self.skipped:
-            parts.append(f"{len(damaged)} files contain invalid records")
-        return "; ".join(parts)
-
 
 def human_size(size: int) -> str:
     for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
@@ -338,17 +334,24 @@ def pad_display(text: str, width: int) -> str:
 
 
 def digest(
-    session: Session, poll: Callable[[], None] | None = None, preview: bool = False
+    session: Session,
+    poll: Callable[[], None] | None = None,
+    preview: bool = False,
+    controls: SessionControls | None = None,
 ) -> str:
     try:
-        return read_digest(session, poll, preview)
+        return read_digest(session, poll, preview, controls)
     except OSError as error:
         return f"Transcript unavailable: {error.strerror or error}. Press r in the list to rescan."
 
 
 def read_digest(
-    session: Session, poll: Callable[[], None] | None = None, preview: bool = False
+    session: Session,
+    poll: Callable[[], None] | None = None,
+    preview: bool = False,
+    controls: SessionControls | None = None,
 ) -> str:
+    controls = session_controls(session) if controls is None else controls
     data = read_brief(session, poll, preview)
     event_counts = data.event_counts
 
@@ -377,10 +380,18 @@ def read_digest(
         # The stored parent link supports tree navigation.  It is not evidence
         # that this was created using a conversation-fork operation.
         metadata.append(f"Parent session: {session.parent_id}")
-    resume = resume_command(session)
+    if controls.runtime_id:
+        metadata.append(
+            f"{controls.runtime_kind.title() if controls.runtime_kind else 'Agent'}: "
+            f"{controls.runtime_state or 'available'} ({controls.runtime_id})"
+        )
+    commands = [
+        f"{command.label}: {shlex.join(command.argv)}" for command in controls.commands
+    ]
     sample = " (preview)" if preview else ""
+    state = " archived" if session.archived else ""
     lines = [
-        f"{human_size(session.size)}  {session.source} {origin_label(session.origin)}  {session_date(session)}",
+        f"{human_size(session.size)}  {session.source} {origin_label(session.origin)}{state}  {session_date(session)}",
         f"Folder: {session.cwd}",
         "Counting activity…"
         if preview
@@ -399,7 +410,7 @@ def read_digest(
         f"ID: {session.session_id}",
         *metadata,
         f"Tags: {', '.join(session.tags)}",
-        *([f"Resume: {resume}"] if resume else []),
+        *commands,
     ]
     return "\n".join(lines)
 
@@ -423,7 +434,7 @@ def print_sessions(sessions: list[Session], sort_by: str) -> None:
     ordered = ordered_sessions(sessions, sort_by)
     for session in ordered:
         print(
-            f"{human_size(session.size):>10}  {session.source:<6}  {origin_label(session.origin):<6}  {session_label(session)[:30]:<30}  {session_date(session):>8}  "
+            f"{human_size(session.size):>10}  {session.source:<6}  {session_type_label(session):<6}  {session_label(session)[:30]:<30}  {session_date(session):>8}  "
             f"[{', '.join(session.tags)}]\n"
             f"{'':>11}{session.session_id[:18]}  {session.cwd}\n"
         )
@@ -431,6 +442,8 @@ def print_sessions(sessions: list[Session], sort_by: str) -> None:
 
 WHEEL_UP = curses.KEY_MAX + 1
 WHEEL_DOWN = curses.KEY_MAX + 2
+CTRL_F = 6
+SEARCH_KEYS = (CTRL_F, ord("/"))
 # Terminal wheel reports have no gesture-end marker. A quiet gap separates
 # gestures; reversing the wheel also starts a new gesture immediately.
 WHEEL_IDLE_SECONDS = 0.25
@@ -570,11 +583,7 @@ def draw_line(
     text = compact_text(terminal_art(text), max(0, width - 1 - right_margin))
     if invert or selected:
         text = pad_display(text, width - 1)
-    attr = (
-        getattr(window, "selection_attr", curses.A_REVERSE) | curses.A_BOLD
-        if selected
-        else color_attr(window, color)
-    )
+    attr = curses.A_REVERSE | curses.A_BOLD if selected else color_attr(window, color)
     if bold:
         attr |= curses.A_BOLD
     if dim:
@@ -608,6 +617,11 @@ def source_color(source: str) -> int:
     return {"codex": 7, "claude": 8, "omp": 10}.get(source, 0)
 
 
+def session_type_label(session: Session) -> str:
+    """Archived is the actionable state; the brief retains the stored type."""
+    return "arch" if session.archived else origin_label(session.origin)
+
+
 def draw_session_line(
     window: curses.window,
     row: int,
@@ -621,7 +635,7 @@ def draw_session_line(
     size, descendants = stats if stats is not None else (session.size, 0)
     prefix = f"  {human_size(size):>10}  "
     source = f"{session.source:<6}"
-    kind = f"  {origin_label(session.origin):<6}"
+    kind = f"  {session_type_label(session):<6}"
     date = f"  {session_date(session):>8}  "
     branch = terminal_art(branch)
     title_width = max(
@@ -655,7 +669,7 @@ def draw_session_line(
                 column,
                 muted_date,
                 len(muted_date),
-                getattr(window, "selection_attr", curses.A_REVERSE) | curses.A_DIM,
+                curses.A_REVERSE | curses.A_DIM,
             )
         return
     _, width = window.getmaxyx()
@@ -734,21 +748,36 @@ def action_dialog(window, title, body, options, default, shortcuts):
 
 
 def confirm_session_action(window: curses.window, session: Session) -> str | None:
-    actions = [action for action in ("archive", "trash") if action in session.actions]
+    supported = available_actions(session)
+    actions = [
+        action
+        for action in ("archive", "unarchive", "trash", "delete")
+        if action in supported
+    ]
+    if session.source == "codex":
+        explanation = (
+            "Unarchive restores it; Delete is permanent."
+            if session.archived
+            else "Archive keeps it on disk; Delete is permanent."
+        )
+    elif actions:
+        explanation = "Archive compresses; Trash is recoverable."
+    else:
+        explanation = "Read-only source."
     return action_dialog(
         window,
         "Session action",
-        [
-            session_label(session),
-            "Archive compresses; Trash is recoverable."
-            if actions
-            else "Read-only source.",
-        ],
+        [session_label(session), explanation],
         [*actions, "cancel"],
         actions[0] if actions else "cancel",
         {
             ord(key): choice
-            for keys, choice in (("aA", "archive"), ("tT", "trash"))
+            for keys, choice in (
+                ("aA", "archive"),
+                ("uU", "unarchive"),
+                ("tT", "trash"),
+                ("dD", "delete"),
+            )
             if choice in actions
             for key in keys
         },
@@ -763,6 +792,20 @@ def confirm_trash(window: curses.window) -> str | None:
         ["yes", "no", "don't ask again"],
         "no",
         {ord("y"): "yes", ord("Y"): "yes"},
+    )
+
+
+def confirm_permanent_delete(window: curses.window) -> bool:
+    return (
+        action_dialog(
+            window,
+            "Confirm delete",
+            ["Permanently delete this session through Codex?"],
+            ["yes", "no"],
+            "no",
+            {ord("y"): "yes", ord("Y"): "yes"},
+        )
+        == "yes"
     )
 
 
@@ -793,8 +836,6 @@ def open_brief(
         known.append(f"Task: {session.task_path}")
     if session.forked_from:
         known.append(f"Forked from: {session.forked_from}")
-    if command := resume_command(session):
-        known.append(f"Resume: {command}")
     window.erase()
     draw_line(window, 0, session_label(session), bold=True)
     draw_line(window, 1, "Reading conversation…  Backspace return")
@@ -811,9 +852,10 @@ def open_brief(
 
     def load() -> None:
         try:
+            controls = session_controls(session)
             for preview in (True, False):
                 poll()
-                body = digest(session, poll, preview)
+                body = digest(session, poll, preview, controls)
                 tree = sizes.splitlines()[1:]
                 updates.append(body + ("\n" + "\n".join(tree) if tree else ""))
         except BriefCancelled:
@@ -879,12 +921,13 @@ def drain_navigation(window, key, selected, positions):
 
 def search_prompt(window: curses.window) -> str:
     height, width = window.getmaxyx()
-    draw_line(window, height - 1, "/".ljust(width - 1))
+    label = "Find: "
+    draw_line(window, height - 1, label.ljust(width - 1))
     try:
         curses.echo()
-        return window.getstr(height - 1, 1, max(1, width - 3)).decode(
-            "utf-8", "replace"
-        )
+        return window.getstr(
+            height - 1, len(label), max(1, width - len(label) - 2)
+        ).decode("utf-8", "replace")
     finally:
         curses.noecho()
 
@@ -916,6 +959,8 @@ def draw_brief_line(window, row: int, line: str) -> None:
             "Recorded via:",
             "Provider:",
             "Model:",
+            "Background:",
+            "Agent:",
         )
     )
     header = re.match(r"^\S+ (?:B|KiB|MiB|GiB|TiB)  (\w+) ", line)
@@ -1002,8 +1047,8 @@ def text_view(
             offset = 0
         elif key == curses.KEY_END:
             offset = maximum
-        elif key in (ord("/"), ord("n"), ord("N")):
-            if key == ord("/"):
+        elif key in (*SEARCH_KEYS, ord("n"), ord("N")):
+            if key in SEARCH_KEYS:
                 query = search_prompt(window)
                 match_index = offset - 1
             match_index = find_match(
@@ -1012,59 +1057,692 @@ def text_view(
             offset = min(maximum, max(0, match_index))
 
 
-def choose(
-    window: curses.window, title: str, options: list[str], current: str
-) -> str | None:
-    """A small htop-like keyboard chooser for a field with few values."""
-    selected = options.index(current) if current in options else 0
-    labels = {"cwd": "folder", "origin": "session type", "date": "updated"}
-    while True:
-        window.erase()
-        height, width = window.getmaxyx()
-        boxed = width >= 38 and height >= len(options) + 5
-        inner = min(48, width - 3)
-        if boxed:
-            label = " " + compact_text(title, inner - 4) + " "
-            draw_line(
-                window,
-                0,
-                terminal_art(
-                    "╭─" + label + "─" * (inner - 1 - display_width(label)) + "╮"
-                ),
-                bold=True,
+def cycle_value(current: str, options: list[str]) -> str:
+    """Advance a small visible setting without opening another screen."""
+    try:
+        return options[(options.index(current) + 1) % len(options)]
+    except ValueError:
+        return options[0]
+
+
+@dataclass
+class TuiState:
+    sessions: list[Session]
+    mode: str
+    sort_by: str
+    cwd_root: Path
+    browser: BrowserState
+    confirm_trash_actions: bool
+    source_filter: str = "all"
+    tree_mode: bool = False
+    collapsed_nodes: set[str] = field(default_factory=set)
+    query: str = ""
+    status: str = ""
+    view_key: tuple | None = None
+    view_data: tuple | None = None
+
+    def current_view(self):
+        """Cache only the current view; navigation must not resolve paths again."""
+        key = (self.source_filter, self.mode, self.browser.cwd_node, self.sort_by)
+        if key != self.view_key:
+            visible, grouped = browser_visible_sessions(
+                self.sessions, self.source_filter, self.mode, self.browser.cwd_node
             )
-            draw_line(
-                window,
-                1,
-                terminal_art(
-                    "│" + " ↑↓ choose  Enter apply  Esc cancel".ljust(inner) + "│"
-                ),
+            items = (
+                cwd_listing(visible, self.browser.cwd_node, self.sort_by)
+                if self.mode == "cwd"
+                else browser_group_items(grouped, self.mode, self.sort_by)
             )
-            draw_line(window, 2, terminal_art("│" + " " * inner + "│"))
+            scoped = (
+                [s for s in grouped if in_scope(s, self.browser.cwd_node)]
+                if self.mode == "cwd"
+                else grouped
+            )
+            self.view_data = visible, grouped, items, scoped
+            self.view_key = key
+        return self.view_data
+
+
+@dataclass
+class TuiFrame:
+    page_size: int
+    visible: list[Session]
+    grouped_visible: list[Session]
+    items: list[tuple[str, str, list[Session]]]
+    tree_entries: list[Session]
+    display_entries: list[tuple[Session, str]]
+    entry_children: dict[str, list[str]]
+    tree_parents: dict[int, int | None]
+    tree_children: dict[int | None, list[int]]
+    total: int
+    selected_entry: Session | None
+
+
+def refresh_tui_view(state: TuiState, frame: TuiFrame) -> None:
+    """Keep an open group anchored after a filter, rescan, action, or sort."""
+    _, current, current_items, _ = state.current_view()
+    browser = state.browser
+    if browser.detail is None:
+        return
+    anchor = (
+        row_id(frame.display_entries[browser.selected][0])
+        if frame.display_entries
+        else None
+    )
+    name = browser.detail[0]
+    entries = (
+        [s for s in current if Path(s.cwd).resolve() == browser.cwd_node]
+        if state.mode == "cwd"
+        else next((es for _, key, es in current_items if key == name), [])
+    )
+    if not entries:
+        browser.leave_detail()
+        return
+    browser.detail = (name, entries)
+    state.tree_mode, state.collapsed_nodes = browser.open_group(
+        state.mode,
+        name,
+        state.source_filter,
+        browser.cwd_node,
+        tree_with_ancestors(entries, current),
+    )
+    rows = tree_rows(
+        entries,
+        current,
+        state.sort_by,
+        state.tree_mode,
+        state.collapsed_nodes,
+    )
+    browser.selected = next(
+        (i for i, (entry, _) in enumerate(rows) if row_id(entry) == anchor),
+        browser.selected,
+    )
+    browser.selected, browser.offset = clamp_view(
+        browser.selected, browser.offset, len(rows), frame.page_size
+    )
+
+
+def render_tui_frame(window: curses.window, state: TuiState) -> TuiFrame:
+    """Render one browser frame and return only the data needed by key handling."""
+    window.erase()
+    height, width = window.getmaxyx()
+    page_size = max(1, height - 4)
+    visible, grouped_visible, base_items, scoped = state.current_view()
+    browser = state.browser
+    if browser.detail is not None and not browser.detail[1]:
+        browser.leave_detail()
+        return render_tui_frame(window, state)
+
+    branches: dict[str, str] = {}
+    display_entries: list[tuple[Session, str]] = []
+    entry_children: dict[str, list[str]] = defaultdict(list)
+    tree_parents: dict[int, int | None] = {}
+    tree_children: dict[int | None, list[int]] = defaultdict(list)
+
+    if browser.detail is None:
+        items = base_items
+        if state.mode == "cwd":
+            direct = [entries[0] for kind, _, entries in items if kind == "session"]
+            tree_entries = tree_with_ancestors(direct, visible)
+            state.tree_mode, state.collapsed_nodes = browser.open_group(
+                state.mode,
+                str(browser.cwd_node),
+                state.source_filter,
+                browser.cwd_node,
+                tree_entries,
+            )
+            folder_rows = [item for item in items if item[0] != "session"]
+            session_rows = tree_rows(
+                direct,
+                visible,
+                state.sort_by,
+                state.tree_mode,
+                state.collapsed_nodes,
+            )
+            branches = {row_id(entry): branch for entry, branch in session_rows}
+            items = folder_rows + [
+                ("session", entry.title, [entry]) for entry, _ in session_rows
+            ]
+            if browser.pending_anchor is not None and state.tree_mode:
+                links = parent_links(tree_entries)
+                shown = {item_key(item) for item in items}
+                while (
+                    browser.pending_anchor not in shown
+                    and browser.pending_anchor in links
+                ):
+                    browser.pending_anchor = links[browser.pending_anchor]
         else:
-            draw_line(window, 0, title, bold=True, invert=True)
-            draw_line(window, 1, "↑↓ choose  Enter apply  Esc cancel")
-        for row, option in enumerate(options, 3):
-            label = labels.get(option, option)
-            if boxed:
-                text = pad_display(compact_text(" " + label, inner), inner)
-                draw_line(window, row, terminal_art("│" + text + "│"))
-                if row - 3 == selected:
-                    window.addnstr(row, 1, text, len(text), curses.A_REVERSE)
-            else:
-                draw_line(window, row, label, selected=row - 3 == selected)
-        if boxed:
-            draw_line(window, len(options) + 3, terminal_art("╰" + "─" * inner + "╯"))
+            state.tree_mode = False
+            tree_entries = []
+        if browser.pending_anchor is not None:
+            browser.selected = next(
+                (
+                    i
+                    for i, item in enumerate(items)
+                    if item_key(item) == browser.pending_anchor
+                ),
+                browser.selected,
+            )
+            browser.pending_anchor = None
+        browser.selected, browser.offset = clamp_view(
+            browser.selected, browser.offset, len(items), page_size
+        )
+        location = (
+            relative_folder(browser.cwd_node, state.cwd_root)
+            if state.mode == "cwd"
+            else {
+                "tag": "tags",
+                "source": "sources",
+                "origin": "session types",
+            }.get(state.mode, state.mode)
+        )
+        stats = (
+            subtree_stats(tree_entries)
+            if state.mode == "cwd" and state.tree_mode
+            else {}
+        )
+        gap = next(
+            (
+                i
+                for i in range(1, len(items))
+                if items[i][0] == "session" and items[i - 1][0] != "session"
+            ),
+            0,
+        )
+        if (
+            browser.selected
+            - browser.offset
+            + int(browser.offset < gap <= browser.selected)
+            >= page_size
+        ):
+            browser.offset += 1
+        largest_group = max(
+            (sum(item.size for item in entries) for _, _, entries in items),
+            default=0,
+        )
+        for index, (kind, name, entries) in enumerate(
+            items[browser.offset : browser.offset + page_size], browser.offset
+        ):
+            row = index - browser.offset + 2 + int(browser.offset < gap <= index)
+            if row >= height - 2:
+                break
+            if kind == "session":
+                draw_session_line(
+                    window,
+                    row,
+                    entries[0],
+                    index == browser.selected,
+                    branches.get(row_id(entries[0]), "") if state.mode == "cwd" else "",
+                    stats.get(row_id(entries[0])),
+                )
+                continue
+            display_name = (
+                "/" + name if kind == "folder" else group_label(name, state.mode)
+            )
+            group_size = sum(item.size for item in entries)
+            text = (
+                f"{human_size(group_size):>10}  "
+                f"{size_bar(group_size, largest_group)}  "
+                f"{len(entries):>5}  {display_name}"
+            )
+            color = origin_color(name) if state.mode == "origin" else 0
+            draw_line(
+                window,
+                row,
+                "  " + text,
+                index == browser.selected,
+                color,
+                pointer=True,
+                right_margin=CONTENT_RIGHT_MARGIN,
+            )
+        total = len(items)
+    else:
+        name, entries = browser.detail
+        items = base_items
+        tree_entries = (
+            tree_with_ancestors(entries, grouped_visible)
+            if state.tree_mode
+            else entries
+        )
+        display_entries = tree_rows(
+            entries,
+            grouped_visible,
+            state.sort_by,
+            state.tree_mode,
+            state.collapsed_nodes,
+        )
+        if browser.pending_anchor is not None:
+            browser.selected = next(
+                (
+                    i
+                    for i, (entry, _) in enumerate(display_entries)
+                    if row_id(entry) == browser.pending_anchor
+                ),
+                browser.selected,
+            )
+            browser.pending_anchor = None
+        display_index = {
+            row_id(entry): index for index, (entry, _) in enumerate(display_entries)
+        }
+        links = parent_links(tree_entries)
+        entry_ids = set(display_index)
+        for entry in tree_entries:
+            parent_id = links.get(row_id(entry))
+            if parent_id in entry_ids:
+                entry_children[parent_id].append(row_id(entry))
+        for index, (entry, _) in enumerate(display_entries):
+            parent = (
+                display_index.get(links.get(row_id(entry))) if state.tree_mode else None
+            )
+            tree_parents[index] = parent
+            tree_children[parent].append(index)
+        browser.selected, browser.offset = clamp_view(
+            browser.selected, browser.offset, len(display_entries), page_size
+        )
+        location = group_label(name, state.mode)
+        stats = subtree_stats(tree_entries) if state.tree_mode else {}
+        for index, (session, branch) in enumerate(
+            display_entries[browser.offset : browser.offset + page_size],
+            browser.offset,
+        ):
+            draw_session_line(
+                window,
+                index - browser.offset + 2,
+                session,
+                index == browser.selected,
+                branch,
+                stats.get(row_id(session)),
+            )
+        total = len(display_entries)
+
+    if browser.detail is None and state.mode == "cwd":
+        display_index = {
+            item_key(item): i for i, item in enumerate(items) if item[0] == "session"
+        }
+        links = parent_links(tree_entries) if state.tree_mode else {}
+        for entry in tree_entries:
+            parent_id = links.get(row_id(entry))
+            if parent_id in display_index:
+                entry_children[parent_id].append(row_id(entry))
+        tree_parents = {
+            i: display_index.get(links.get(item_key(item)))
+            for i, item in enumerate(items)
+        }
+        for index, parent in tree_parents.items():
+            tree_children[parent].append(index)
+
+    footer_sessions = browser.detail[1] if browser.detail is not None else scoped
+    footer = (
+        f"Transcripts: {human_size(sum(session.size for session in footer_sessions))}  "
+        f"{len(footer_sessions):,} sessions"
+    )
+    label = f" asdu  {location}"
+    if state.source_filter != "all":
+        label += f"  [{state.source_filter}]"
+    ordering = ("tree " if state.tree_mode else "") + sort_label(state.sort_by) + " "
+    available = max(0, width - 1 - display_width(ordering))
+    draw_line(
+        window,
+        0,
+        pad_display(compact_text(label, available), available) + ordering,
+        bold=True,
+        invert=True,
+    )
+    selected_session = browser.detail is not None or (
+        bool(items) and items[browser.selected][0] == "session"
+    )
+    has_sessions = browser.detail is not None or any(
+        kind == "session" for kind, _, _ in items
+    )
+    commands = ["Enter open"]
+    if browser.detail is not None or (
+        state.mode == "cwd" and browser.cwd_node != state.cwd_root
+    ):
+        commands.append("Backspace back")
+    if browser.detail is None:
+        commands.append("g group")
+    commands.extend(["f filter", "s sort", "Ctrl-F find"])
+    if has_sessions:
+        commands.append("t tree")
+    if selected_session:
+        commands.append("a action")
+    commands.append("? help")
+    draw_line(window, height - 2, " " + (state.status or footer))
+    draw_line(window, height - 1, " " + "  ".join(commands), invert=True)
+    window.refresh()
+
+    selected_entry = (
+        display_entries[browser.selected][0]
+        if browser.detail is not None and display_entries
+        else items[browser.selected][2][0]
+        if browser.detail is None and items and items[browser.selected][0] == "session"
+        else None
+    )
+    return TuiFrame(
+        page_size=page_size,
+        visible=visible,
+        grouped_visible=grouped_visible,
+        items=items,
+        tree_entries=tree_entries,
+        display_entries=display_entries,
+        entry_children=entry_children,
+        tree_parents=tree_parents,
+        tree_children=tree_children,
+        total=total,
+        selected_entry=selected_entry,
+    )
+
+
+def handle_tui_key(
+    window: curses.window,
+    state: TuiState,
+    frame: TuiFrame,
+    key: int,
+    rescan: Callable[[Callable[[str, int, int, int, int], None]], list[Session]],
+) -> bool:
+    """Apply one key to browser state; return false only when the TUI should exit."""
+    browser = state.browser
+    items = frame.items
+    selected_entry = frame.selected_entry
+    state.status = ""
+    if browser.detail is None and state.mode == "cwd" and selected_entry is None:
+        if key in (curses.KEY_RIGHT, ord("l")):
+            key = 10
+        elif key in (curses.KEY_LEFT, ord("h")):
+            key = 127
+
+    if key in (*SEARCH_KEYS, ord("n"), ord("N")):
+        if key in SEARCH_KEYS:
+            state.query = search_prompt(window)
+        labels = (
+            [session_label(entry) for entry, _ in frame.display_entries]
+            if browser.detail
+            else [
+                session_label(entries[0])
+                if kind == "session"
+                else group_label(name, state.mode)
+                for kind, name, entries in items
+            ]
+        )
+        found = find_match(
+            labels,
+            state.query,
+            browser.selected,
+            -1 if key == ord("N") else 1,
+        )
+        state.status = (
+            f"Find: {state.query}"
+            if any(state.query.casefold() in label.casefold() for label in labels)
+            else f"No match: {state.query}"
+        )
+        browser.selected = found
+        return True
+    if key in (curses.KEY_HOME, curses.KEY_END):
+        browser.selected = 0 if key == curses.KEY_HOME else max(0, frame.total - 1)
+        return True
+    if key in (ord("q"), 27):
+        return False
+    if key == ord("?"):
+        text_view(
+            window,
+            "Help",
+            "Sizes: saved conversation bytes, not project files. Updated: file modification time.\n"
+            "Tag groups: primary tag only; briefs list every matching tag.\n\n"
+            "Enter: open folder or session brief\n"
+            "Ctrl-F or /: find text; n/N: next/previous match\n"
+            "Home/End: first/last\n"
+            "Backspace: parent folder or previous list\n"
+            "r: rescan local session roots\n"
+            "f: cycle source filter\n"
+            "s: cycle sort\n"
+            "g: cycle folder, tag, source, or session-type groups\n"
+            "t: toggle session tree (↑↓ siblings, ←→ parent/child, Space fold, z all)\n"
+            "a: source-supported session actions\n"
+            "i: open a session brief\n"
+            "q: quit",
+        )
+        return True
+    if key == ord("r"):
+        if browser.detail is None and items:
+            browser.pending_anchor = item_key(items[browser.selected])
+
+        def show_rescan(
+            source: str,
+            current: int,
+            total: int,
+            done_bytes: int,
+            total_bytes: int,
+        ) -> None:
+            window.erase()
+            progress_height, progress_width = window.getmaxyx()
+            lines = indexing_lines(
+                min(progress_width - 1, 47)
+                if progress_height < 15
+                else progress_width - 1,
+                source,
+                current,
+                done_bytes,
+                total_bytes,
+            )
+            top, left = splash_position(progress_width - 1, progress_height, lines)
+            for row, line in enumerate(lines):
+                draw_line(
+                    window,
+                    top + row,
+                    " " * left + line,
+                    bold=row < 6 and len(lines) > 1,
+                )
+            window.refresh()
+
+        window.erase()
+        draw_line(
+            window,
+            0,
+            " asdu  |  rescanning local sessions ",
+            bold=True,
+            invert=True,
+        )
+        draw_line(window, 2, "  Collecting local transcripts…")
         window.refresh()
-        key = window.getch()
-        if key in (27, ord("q")):
-            return None
-        if key in (curses.KEY_ENTER, 10, 13):
-            return options[selected]
-        if key in (curses.KEY_DOWN, ord("j")):
-            selected = min(len(options) - 1, selected + 1)
-        elif key in (curses.KEY_UP, ord("k")):
-            selected = max(0, selected - 1)
+        try:
+            state.sessions[:] = rescan(show_rescan)
+        except OSError as error:
+            state.status = f"Rescan failed: {error}"
+        else:
+            state.view_key = None
+            refresh_tui_view(state, frame)
+        return True
+
+    tree_keys = (
+        curses.KEY_DOWN,
+        ord("j"),
+        curses.KEY_UP,
+        ord("k"),
+        curses.KEY_LEFT,
+        ord("h"),
+        curses.KEY_RIGHT,
+        ord("l"),
+    )
+    if selected_entry is not None and state.tree_mode and key in tree_keys:
+        parent = frame.tree_parents.get(browser.selected)
+        siblings = frame.tree_children.get(parent, [])
+        sibling_position = (
+            siblings.index(browser.selected) if browser.selected in siblings else 0
+        )
+        if key in (curses.KEY_DOWN, ord("j")) and sibling_position + 1 < len(siblings):
+            browser.selected = siblings[sibling_position + 1]
+        elif key in (curses.KEY_UP, ord("k")) and sibling_position > 0:
+            browser.selected = siblings[sibling_position - 1]
+        elif key in (curses.KEY_RIGHT, ord("l")):
+            if row_id(selected_entry) in state.collapsed_nodes:
+                state.collapsed_nodes.remove(row_id(selected_entry))
+            elif frame.tree_children.get(browser.selected):
+                browser.selected = frame.tree_children[browser.selected][0]
+        elif key in (curses.KEY_LEFT, ord("h")):
+            if (
+                frame.entry_children.get(row_id(selected_entry))
+                and row_id(selected_entry) not in state.collapsed_nodes
+            ):
+                state.collapsed_nodes.add(row_id(selected_entry))
+            elif parent is not None:
+                browser.selected = parent
+    elif selected_entry is not None and state.tree_mode and key == ord(" "):
+        identifier = row_id(selected_entry)
+        if frame.entry_children.get(identifier):
+            if identifier in state.collapsed_nodes:
+                state.collapsed_nodes.remove(identifier)
+            else:
+                state.collapsed_nodes.add(identifier)
+    elif state.tree_mode and key == ord("z"):
+        if browser.detail is None and items:
+            browser.pending_anchor = item_key(items[browser.selected])
+        nodes_with_children = set(frame.entry_children)
+        if nodes_with_children.issubset(state.collapsed_nodes):
+            state.collapsed_nodes.clear()
+        else:
+            state.collapsed_nodes.update(nodes_with_children)
+    elif key in (curses.KEY_DOWN, ord("j")):
+        if browser.selected < frame.total - 1:
+            browser.selected += 1
+    elif key in (curses.KEY_UP, ord("k")):
+        if browser.selected > 0:
+            browser.selected -= 1
+    elif key == curses.KEY_NPAGE:
+        if browser.selected < frame.total - 1:
+            browser.selected = min(frame.total - 1, browser.selected + frame.page_size)
+    elif key == curses.KEY_PPAGE:
+        if browser.selected > 0:
+            browser.selected = max(0, browser.selected - frame.page_size)
+    elif browser.detail is None and key == ord("g"):
+        state.mode = cycle_value(state.mode, ["cwd", "tag", "source", "origin"])
+        browser.selected, browser.offset = 0, 0
+    elif browser.detail is None and state.mode == "cwd" and key == ord("t"):
+        browser.pending_anchor = item_key(items[browser.selected]) if items else None
+        state.tree_mode, state.collapsed_nodes = browser.toggle_tree(frame.tree_entries)
+    elif browser.detail is not None and key == ord("t"):
+        contextual_tree = tree_with_ancestors(browser.detail[1], frame.grouped_visible)
+        state.tree_mode, state.collapsed_nodes = browser.toggle_tree(contextual_tree)
+        browser.selected, browser.offset = 0, 0
+    elif key == ord("a") and (
+        browser.detail is not None
+        or (items and items[browser.selected][0] == "session")
+    ):
+        entry = (
+            frame.display_entries[browser.selected][0]
+            if browser.detail is not None
+            else items[browser.selected][2][0]
+        )
+        choice = confirm_session_action(window, entry)
+        if choice == "trash" and state.confirm_trash_actions:
+            confirmation = confirm_trash(window)
+            if confirmation is None:
+                choice = None
+            elif confirmation == "don't ask again":
+                disable_trash_confirmation()
+                state.confirm_trash_actions = False
+        elif choice == "delete" and not confirm_permanent_delete(window):
+            choice = None
+        if choice is not None:
+            try:
+                outcome = perform_session_action(entry, choice)
+                result = {
+                    "archive": "Archived",
+                    "unarchive": "Unarchived",
+                    "trash": "Trashed",
+                    "delete": "Deleted",
+                }[choice]
+                try:
+                    record_action(choice, entry, outcome.destination)
+                except OSError as error:
+                    state.status = f"{result}; action log unavailable: {error}"
+                else:
+                    state.status = result
+            except OSError as error:
+                state.status = str(error)
+            else:
+                replacement = outcome.replacement
+                position = state.sessions.index(entry)
+                if replacement is None:
+                    state.sessions.pop(position)
+                else:
+                    state.sessions[position] = replacement
+                state.view_key = None
+                if browser.detail is not None and entry in browser.detail[1]:
+                    position = browser.detail[1].index(entry)
+                    if replacement is None:
+                        browser.detail[1].pop(position)
+                    else:
+                        browser.detail[1][position] = replacement
+    elif key == ord("f"):
+        available = ["all", *sorted({session.source for session in state.sessions})]
+        if browser.detail is None and items:
+            browser.pending_anchor = item_key(items[browser.selected])
+        state.source_filter = cycle_value(state.source_filter, available)
+        refresh_tui_view(state, frame)
+    elif browser.detail is not None and key == ord("s"):
+        browser.pending_anchor = (
+            row_id(frame.display_entries[browser.selected][0])
+            if frame.display_entries
+            else None
+        )
+        state.sort_by = cycle_value(state.sort_by, ["size", "date", "name"])
+    elif browser.detail is None and key == ord("s"):
+        browser.pending_anchor = item_key(items[browser.selected]) if items else None
+        state.sort_by = cycle_value(
+            state.sort_by, ["size", "date", "count", "name"]
+        )
+    elif browser.detail is None and key in (curses.KEY_ENTER, 10, 13):
+        if not items:
+            return True
+        kind, name, entries = items[browser.selected]
+        if state.mode == "cwd":
+            if kind == "folder":
+                browser.visit_folder(
+                    browser.cwd_node / name, item_key(items[browser.selected])
+                )
+            else:
+                open_brief(
+                    window,
+                    entries[0],
+                    frame.tree_entries if state.tree_mode else frame.visible,
+                )
+            return True
+        browser.detail = (name, entries)
+        browser.detail_return = (item_key(items[browser.selected]), browser.offset)
+        tree_entries = tree_with_ancestors(entries, frame.grouped_visible)
+        state.tree_mode, state.collapsed_nodes = browser.open_group(
+            state.mode,
+            name,
+            state.source_filter,
+            browser.cwd_node,
+            tree_entries,
+        )
+        browser.selected, browser.offset = 0, 0
+    elif (
+        browser.detail is None
+        and state.mode == "cwd"
+        and key in (curses.KEY_BACKSPACE, 127, 8)
+    ):
+        if browser.cwd_node != state.cwd_root:
+            browser.visit_folder(
+                browser.cwd_node.parent,
+                item_key(items[browser.selected]) if items else None,
+            )
+    elif browser.detail is not None and key in (curses.KEY_BACKSPACE, 127, 8):
+        browser.leave_detail()
+    elif browser.detail is not None and key in (
+        ord("i"),
+        curses.KEY_ENTER,
+        10,
+        13,
+    ):
+        entry = frame.display_entries[browser.selected][0]
+        open_brief(
+            window,
+            entry,
+            frame.tree_entries if state.tree_mode else frame.visible,
+        )
+    return True
 
 
 def tui(
@@ -1072,21 +1750,18 @@ def tui(
     initial_mode: str,
     initial_sort: str,
     scope: Path | None,
-    ask_before_delete: bool,
+    ask_before_trash: bool,
     rescan: Callable[[Callable[[str, int, int, int, int], None]], list[Session]],
-    scan_notice: Callable[[], str] = lambda: "",
     no_color: bool = False,
 ) -> None:
-    """A small ncdu-like drill-down UI with explicit archive/Trash actions."""
+    """A small ncdu-like drill-down UI with explicit source-aware actions."""
 
-    def run(window: curses.window) -> None:
-        window = TerminalWindow(window)
+    def run(raw_window: curses.window) -> None:
+        window = TerminalWindow(raw_window)
         curses.curs_set(0)
         # Zellij owns pane-local selection and translates alternate-screen
         # scrolling into arrows. Capturing clicks here steals its selection.
         capture_mouse = not os.environ.get("ZELLIJ")
-        # New curses decodes wheel reports itself; old builds without BUTTON5
-        # need the raw SGR parser. Both preserve wheel/keyboard provenance.
         try:
             down_button = getattr(curses, "BUTTON5_PRESSED", 0)
             curses.mousemask(
@@ -1100,676 +1775,59 @@ def tui(
         if capture_mouse and sys.stdout.isatty():
             sys.stdout.write("\x1b[?1000h\x1b[?1006h")
             sys.stdout.flush()
+
         window.colors_enabled = (
             not (no_color or os.environ.get("NO_COLOR")) and curses.has_colors()
         )
         if window.colors_enabled:
             curses.start_color()
             curses.use_default_colors()
-            curses.init_pair(1, curses.COLOR_GREEN, -1)  # explicit user
-            curses.init_pair(2, curses.COLOR_YELLOW, -1)  # primary
-            curses.init_pair(3, curses.COLOR_MAGENTA, -1)  # subagent
-            curses.init_pair(4, curses.COLOR_CYAN, -1)  # review
-            curses.init_pair(5, curses.COLOR_RED, -1)  # automation
-            curses.init_pair(6, curses.COLOR_BLUE, -1)  # IDE-created
+            curses.init_pair(1, curses.COLOR_GREEN, -1)
+            curses.init_pair(2, curses.COLOR_YELLOW, -1)
+            curses.init_pair(3, curses.COLOR_MAGENTA, -1)
+            curses.init_pair(4, curses.COLOR_CYAN, -1)
+            curses.init_pair(5, curses.COLOR_RED, -1)
+            curses.init_pair(6, curses.COLOR_BLUE, -1)
             if curses.COLORS >= 256:
-                curses.init_pair(7, 33, -1)  # Codex: bright blue
-                curses.init_pair(8, 208, -1)  # Claude: orange
-                curses.init_pair(10, 37, -1)  # OMP: teal
-                curses.init_pair(9, 255, 237)  # Selection: white on charcoal
+                curses.init_pair(7, 33, -1)
+                curses.init_pair(8, 208, -1)
+                curses.init_pair(10, 37, -1)
             else:
                 curses.init_pair(7, curses.COLOR_CYAN, -1)
                 curses.init_pair(8, curses.COLOR_YELLOW, -1)
                 curses.init_pair(10, curses.COLOR_GREEN, -1)
-                curses.init_pair(9, curses.COLOR_WHITE, curses.COLOR_BLACK)
-            window.selection_attr = curses.color_pair(9)
-        mode, sort_by, source_filter, tree_mode = (
+
+        cwd_root = scope or Path("/")
+        state = TuiState(
+            sessions,
             initial_mode,
             initial_sort,
-            "all",
-            False,
+            cwd_root,
+            BrowserState.create(cwd_root),
+            ask_before_trash,
         )
-        collapsed_nodes: set[str] = set()
-        cwd_root = scope or Path("/")
-        browser = BrowserState.create(cwd_root)
-        confirm_deletes = ask_before_delete
-        query = ""
-        status = ""
-        view_key = None
-        view_data = None
-
-        def current_view():
-            """Reuse only this view; navigation must not resolve paths again."""
-            nonlocal view_key, view_data
-            key = (source_filter, mode, browser.cwd_node, sort_by)
-            if key != view_key:
-                visible, grouped = browser_visible_sessions(
-                    sessions, source_filter, mode, browser.cwd_node
-                )
-                items = (
-                    cwd_listing(visible, browser.cwd_node, sort_by)
-                    if mode == "cwd"
-                    else browser_group_items(grouped, mode, sort_by)
-                )
-                scoped = (
-                    [s for s in grouped if in_scope(s, browser.cwd_node)]
-                    if mode == "cwd"
-                    else grouped
-                )
-                view_data = visible, grouped, items, scoped
-                view_key = key
-            return view_data
-
-        def refresh_view() -> None:
-            nonlocal tree_mode, collapsed_nodes
-            _, current, current_items, _ = current_view()
-            if browser.detail is None:
-                return
-            anchor = (
-                row_id(display_entries[browser.selected][0])
-                if display_entries
-                else None
-            )
-            name = browser.detail[0]
-            entries = (
-                [s for s in current if Path(s.cwd).resolve() == browser.cwd_node]
-                if mode == "cwd"
-                else next(
-                    (es for _, key, es in current_items if key == name),
-                    [],
-                )
-            )
-            if not entries:
-                browser.leave_detail()
-                return
-            browser.detail = (name, entries)
-            tree_mode, collapsed_nodes = browser.open_group(
-                mode,
-                name,
-                source_filter,
-                browser.cwd_node,
-                tree_with_ancestors(entries, current),
-            )
-            rows = tree_rows(entries, current, sort_by, tree_mode, collapsed_nodes)
-            browser.selected = next(
-                (i for i, (entry, _) in enumerate(rows) if row_id(entry) == anchor),
-                browser.selected,
-            )
-            browser.selected, browser.offset = clamp_view(
-                browser.selected, browser.offset, len(rows), page_size
-            )
-
         while True:
-            window.erase()
-            height, width = window.getmaxyx()
-            page_size = max(1, height - 4)
-            visible, grouped_visible, base_items, scoped = current_view()
-            if browser.detail is not None and not browser.detail[1]:
-                browser.leave_detail()
-                continue
-            if browser.detail is None:
-                if mode == "cwd":
-                    items = base_items
-                    direct = [es[0] for kind, _, es in items if kind == "session"]
-                    tree_entries = tree_with_ancestors(direct, visible)
-                    tree_mode, collapsed_nodes = browser.open_group(
-                        mode,
-                        str(browser.cwd_node),
-                        source_filter,
-                        browser.cwd_node,
-                        tree_entries,
-                    )
-                    folder_rows = [item for item in items if item[0] != "session"]
-                    session_rows = tree_rows(
-                        direct, visible, sort_by, tree_mode, collapsed_nodes
-                    )
-                    branches = {row_id(entry): branch for entry, branch in session_rows}
-                    items = folder_rows + [
-                        ("session", entry.title, [entry]) for entry, _ in session_rows
-                    ]
-                    if browser.pending_anchor is not None and tree_mode:
-                        links = parent_links(tree_entries)
-                        shown = {item_key(item) for item in items}
-                        while (
-                            browser.pending_anchor not in shown
-                            and browser.pending_anchor in links
-                        ):
-                            browser.pending_anchor = links[browser.pending_anchor]
-                else:
-                    tree_mode = False
-                    items = base_items
-                if browser.pending_anchor is not None:
-                    browser.selected = next(
-                        (
-                            i
-                            for i, item in enumerate(items)
-                            if item_key(item) == browser.pending_anchor
-                        ),
-                        browser.selected,
-                    )
-                    browser.pending_anchor = None
-                browser.selected, browser.offset = clamp_view(
-                    browser.selected, browser.offset, len(items), page_size
-                )
-                if mode == "cwd":
-                    location = relative_folder(browser.cwd_node, cwd_root)
-                else:
-                    location = {
-                        "tag": "tags",
-                        "source": "sources",
-                        "origin": "session types",
-                    }.get(mode, mode)
-                stats = (
-                    subtree_stats(tree_entries) if mode == "cwd" and tree_mode else {}
-                )
-                gap = next(
-                    (
-                        i
-                        for i in range(1, len(items))
-                        if items[i][0] == "session" and items[i - 1][0] != "session"
-                    ),
-                    0,
-                )
-                if (
-                    browser.selected
-                    - browser.offset
-                    + int(browser.offset < gap <= browser.selected)
-                    >= page_size
-                ):
-                    browser.offset += 1
-                largest_group = max(
-                    (sum(item.size for item in entries) for _, _, entries in items),
-                    default=0,
-                )
-                for index, (kind, name, entries) in enumerate(
-                    items[browser.offset : browser.offset + page_size], browser.offset
-                ):
-                    row = (
-                        index - browser.offset + 2 + int(browser.offset < gap <= index)
-                    )
-                    if row >= height - 2:
-                        break
-                    display_name = (
-                        "/" + name if kind == "folder" else group_label(name, mode)
-                    )
-                    group_size = sum(item.size for item in entries)
-                    if kind == "session":
-                        draw_session_line(
-                            window,
-                            row,
-                            entries[0],
-                            index == browser.selected,
-                            branches.get(row_id(entries[0]), "")
-                            if mode == "cwd"
-                            else "",
-                            stats.get(row_id(entries[0])),
-                        )
-                        continue
-                    else:
-                        text = f"{human_size(group_size):>10}  {size_bar(group_size, largest_group)}  {len(entries):>5}  {display_name}"
-                        color = origin_color(name) if mode == "origin" else 0
-                    draw_line(
-                        window,
-                        row,
-                        "  " + text,
-                        index == browser.selected,
-                        color,
-                        pointer=True,
-                        right_margin=CONTENT_RIGHT_MARGIN,
-                    )
-                total = len(items)
-            else:
-                name, entries = browser.detail
-                tree_entries = (
-                    tree_with_ancestors(entries, grouped_visible)
-                    if tree_mode
-                    else entries
-                )
-                display_entries = tree_rows(
-                    entries, grouped_visible, sort_by, tree_mode, collapsed_nodes
-                )
-                if browser.pending_anchor is not None:
-                    browser.selected = next(
-                        (
-                            i
-                            for i, (entry, _) in enumerate(display_entries)
-                            if row_id(entry) == browser.pending_anchor
-                        ),
-                        browser.selected,
-                    )
-                    browser.pending_anchor = None
-                # Keep a hierarchy alongside the flattened rendering so tree
-                # mode can move between siblings and parent/child nodes.
-                display_index = {
-                    row_id(entry): index
-                    for index, (entry, _) in enumerate(display_entries)
-                }
-                links = parent_links(tree_entries)
-                entry_ids = set(display_index)
-                entry_children: dict[str, list[str]] = defaultdict(list)
-                for entry in tree_entries:
-                    parent_id = links.get(row_id(entry))
-                    if parent_id in entry_ids:
-                        entry_children[parent_id].append(row_id(entry))
-                tree_parents: dict[int, int | None] = {}
-                tree_children: dict[int | None, list[int]] = defaultdict(list)
-                for index, (entry, _) in enumerate(display_entries):
-                    parent = (
-                        display_index.get(links.get(row_id(entry)))
-                        if tree_mode
-                        else None
-                    )
-                    tree_parents[index] = parent
-                    tree_children[parent].append(index)
-                browser.selected, browser.offset = clamp_view(
-                    browser.selected, browser.offset, len(display_entries), page_size
-                )
-                location = group_label(name, mode)
-                stats = subtree_stats(tree_entries) if tree_mode else {}
-                for index, (session, branch) in enumerate(
-                    display_entries[browser.offset : browser.offset + page_size],
-                    browser.offset,
-                ):
-                    draw_session_line(
-                        window,
-                        index - browser.offset + 2,
-                        session,
-                        index == browser.selected,
-                        branch,
-                        stats.get(row_id(session)),
-                    )
-                total = len(display_entries)
-
-            if browser.detail is None and mode == "cwd":
-                display_index = {
-                    item_key(item): i
-                    for i, item in enumerate(items)
-                    if item[0] == "session"
-                }
-                links = parent_links(tree_entries) if tree_mode else {}
-                entry_children = defaultdict(list)
-                for entry in tree_entries:
-                    parent_id = links.get(row_id(entry))
-                    if parent_id in display_index:
-                        entry_children[parent_id].append(row_id(entry))
-                tree_parents = {
-                    i: display_index.get(links.get(item_key(item)))
-                    for i, item in enumerate(items)
-                }
-                tree_children = defaultdict(list)
-                for index, parent in tree_parents.items():
-                    tree_children[parent].append(index)
-
-            footer_sessions = (
-                browser.detail[1] if browser.detail is not None else scoped
-            )
-            footer = (
-                f"Transcripts: {human_size(sum(session.size for session in footer_sessions))}  "
-                f"{len(footer_sessions):,} sessions"
-            )
-            if warning := scan_notice():
-                footer += "  " + warning
-            label = f" asdu  {location}"
-            if source_filter != "all":
-                label += f"  [{source_filter}]"
-            ordering = ("tree " if tree_mode else "") + sort_label(sort_by) + " "
-            available = max(0, width - 1 - display_width(ordering))
-            draw_line(
-                window,
-                0,
-                pad_display(compact_text(label, available), available) + ordering,
-                bold=True,
-                invert=True,
-            )
-            selected_session = browser.detail is not None or (
-                bool(items) and items[browser.selected][0] == "session"
-            )
-            has_sessions = browser.detail is not None or any(
-                kind == "session" for kind, _, _ in items
-            )
-            commands = ["Enter open"]
-            if browser.detail is not None or (
-                mode == "cwd" and browser.cwd_node != cwd_root
-            ):
-                commands.append("Backspace back")
-            if browser.detail is None:
-                commands.append("g group")
-            commands.extend(["f filter", "s sort"])
-            if has_sessions:
-                commands.append("t tree")
-            if selected_session:
-                commands.append("a action")
-            commands.append("? help")
-            draw_line(window, height - 2, " " + (status or footer))
-            draw_line(window, height - 1, " " + "  ".join(commands), invert=True)
-
-            window.refresh()
+            frame = render_tui_frame(window, state)
             siblings = (
-                tree_children.get(tree_parents.get(browser.selected), [])
-                if tree_mode
+                frame.tree_children.get(
+                    frame.tree_parents.get(state.browser.selected), []
+                )
+                if state.tree_mode
                 else []
             )
-            first = browser.selected == (siblings[0] if siblings else 0)
-            last = browser.selected == (siblings[-1] if siblings else max(0, total - 1))
+            first = state.browser.selected == (siblings[0] if siblings else 0)
+            last = state.browser.selected == (
+                siblings[-1] if siblings else max(0, frame.total - 1)
+            )
             key = read_navigation(window, first, last)
-            browser.selected, key = drain_navigation(
-                window, key, browser.selected, siblings or range(total)
+            state.browser.selected, key = drain_navigation(
+                window,
+                key,
+                state.browser.selected,
+                siblings or range(frame.total),
             )
-            if key == -1:
-                continue
-            selected_entry = (
-                display_entries[browser.selected][0]
-                if browser.detail is not None and display_entries
-                else items[browser.selected][2][0]
-                if browser.detail is None
-                and items
-                and items[browser.selected][0] == "session"
-                else None
-            )
-            if browser.detail is None and mode == "cwd" and selected_entry is None:
-                if key in (curses.KEY_RIGHT, ord("l")):
-                    key = 10
-                elif key in (curses.KEY_LEFT, ord("h")):
-                    key = 127
-            status = ""
-            if key in (ord("/"), ord("n"), ord("N")):
-                if key == ord("/"):
-                    query = search_prompt(window)
-                labels = (
-                    [session_label(entry) for entry, _ in display_entries]
-                    if browser.detail
-                    else [
-                        session_label(es[0])
-                        if kind == "session"
-                        else group_label(name, mode)
-                        for kind, name, es in items
-                    ]
-                )
-                found = find_match(
-                    labels, query, browser.selected, -1 if key == ord("N") else 1
-                )
-                status = (
-                    f"/{query}"
-                    if any(query.casefold() in label.casefold() for label in labels)
-                    else f"No match: {query}"
-                )
-                browser.selected = found
-                continue
-            if key in (curses.KEY_HOME, curses.KEY_END):
-                browser.selected = 0 if key == curses.KEY_HOME else max(0, total - 1)
-                continue
-            if key in (ord("q"), 27):
+            if key != -1 and not handle_tui_key(window, state, frame, key, rescan):
                 return
-            if key == ord("?"):
-                text_view(
-                    window,
-                    "Help",
-                    "Sizes: saved conversation bytes, not project files. Updated: file modification time.\n"
-                    "Tag groups: primary tag only; briefs list every matching tag.\n\n"
-                    "Enter: open folder or session brief\n/: find text; n/N: next/previous match\nHome/End: first/last\nBackspace: parent folder or previous list\nr: rescan local session roots\nf: filter by source\ns: choose sort\ng: group by folder, tag, source, or session type\nt: toggle session tree (↑↓ siblings, ←→ parent/child, Space fold, z all)\na: archive or move selected session to Trash\ni: open a session brief\nq: quit",
-                )
-                continue
-            if key == ord("r"):
-                if browser.detail is None and items:
-                    browser.pending_anchor = item_key(items[browser.selected])
-
-                def show_rescan(
-                    source: str,
-                    current: int,
-                    total: int,
-                    done_bytes: int,
-                    total_bytes: int,
-                ) -> None:
-                    window.erase()
-                    _, progress_width = window.getmaxyx()
-                    progress_height, _ = window.getmaxyx()
-                    lines = indexing_lines(
-                        min(progress_width - 1, 47)
-                        if progress_height < 15
-                        else progress_width - 1,
-                        source,
-                        current,
-                        done_bytes,
-                        total_bytes,
-                    )
-                    top, left = splash_position(
-                        progress_width - 1, progress_height, lines
-                    )
-                    for row, line in enumerate(lines):
-                        draw_line(
-                            window,
-                            top + row,
-                            " " * left + line,
-                            bold=row < 6 and len(lines) > 1,
-                        )
-                    window.refresh()
-
-                window.erase()
-                draw_line(
-                    window,
-                    0,
-                    " asdu  |  rescanning local sessions ",
-                    bold=True,
-                    invert=True,
-                )
-                draw_line(window, 2, "  Collecting local transcripts…")
-                window.refresh()
-                try:
-                    sessions[:] = rescan(show_rescan)
-                except OSError as error:
-                    status = f"Rescan failed: {error}"
-                else:
-                    view_key = None
-                    refresh_view()
-                continue
-            if (
-                selected_entry is not None
-                and tree_mode
-                and key
-                in (
-                    curses.KEY_DOWN,
-                    ord("j"),
-                    curses.KEY_UP,
-                    ord("k"),
-                    curses.KEY_LEFT,
-                    ord("h"),
-                    curses.KEY_RIGHT,
-                    ord("l"),
-                )
-            ):
-                entry = selected_entry
-                parent = tree_parents.get(browser.selected)
-                siblings = tree_children.get(parent, [])
-                sibling_position = (
-                    siblings.index(browser.selected)
-                    if browser.selected in siblings
-                    else 0
-                )
-                if key in (curses.KEY_DOWN, ord("j")) and sibling_position + 1 < len(
-                    siblings
-                ):
-                    browser.selected = siblings[sibling_position + 1]
-                elif key in (curses.KEY_UP, ord("k")) and sibling_position > 0:
-                    browser.selected = siblings[sibling_position - 1]
-                elif key in (curses.KEY_RIGHT, ord("l")):
-                    if row_id(entry) in collapsed_nodes:
-                        collapsed_nodes.remove(row_id(entry))
-                    elif tree_children.get(browser.selected):
-                        browser.selected = tree_children[browser.selected][0]
-                elif key in (curses.KEY_LEFT, ord("h")):
-                    if (
-                        entry_children.get(row_id(entry))
-                        and row_id(entry) not in collapsed_nodes
-                    ):
-                        collapsed_nodes.add(row_id(entry))
-                    elif parent is not None:
-                        browser.selected = parent
-            elif selected_entry is not None and tree_mode and key == ord(" "):
-                entry = selected_entry
-                if entry_children.get(row_id(entry)):
-                    if row_id(entry) in collapsed_nodes:
-                        collapsed_nodes.remove(row_id(entry))
-                    else:
-                        collapsed_nodes.add(row_id(entry))
-            elif tree_mode and key == ord("z"):
-                if browser.detail is None and items:
-                    browser.pending_anchor = item_key(items[browser.selected])
-                nodes_with_children = set(entry_children)
-                if nodes_with_children.issubset(collapsed_nodes):
-                    collapsed_nodes.clear()
-                else:
-                    collapsed_nodes.update(nodes_with_children)
-            elif key in (curses.KEY_DOWN, ord("j")):
-                if browser.selected < total - 1:
-                    browser.selected += 1
-            elif key in (curses.KEY_UP, ord("k")):
-                if browser.selected > 0:
-                    browser.selected -= 1
-            elif key == curses.KEY_NPAGE:
-                if browser.selected < total - 1:
-                    browser.selected = min(total - 1, browser.selected + page_size)
-            elif key == curses.KEY_PPAGE:
-                if browser.selected > 0:
-                    browser.selected = max(0, browser.selected - page_size)
-            elif browser.detail is None and key == ord("g"):
-                choice = choose(
-                    window,
-                    "Group sessions by",
-                    ["cwd", "tag", "source", "origin"],
-                    mode,
-                )
-                if choice is not None:
-                    mode = choice
-                    browser.selected, browser.offset = 0, 0
-            elif browser.detail is None and mode == "cwd" and key == ord("t"):
-                browser.pending_anchor = (
-                    item_key(items[browser.selected]) if items else None
-                )
-                tree_mode, collapsed_nodes = browser.toggle_tree(tree_entries)
-            elif browser.detail is not None and key == ord("t"):
-                # Build the same contextual tree used for rendering.  A
-                # parent outside this tag would otherwise be added only on
-                # the next frame and escape the initial folded set.
-                contextual_tree = tree_with_ancestors(
-                    browser.detail[1], grouped_visible
-                )
-                tree_mode, collapsed_nodes = browser.toggle_tree(contextual_tree)
-                browser.selected, browser.offset = 0, 0
-            elif key == ord("a") and (
-                browser.detail is not None
-                or (items and items[browser.selected][0] == "session")
-            ):
-                entry = (
-                    display_entries[browser.selected][0]
-                    if browser.detail is not None
-                    else items[browser.selected][2][0]
-                )
-                choice = confirm_session_action(window, entry)
-                if choice == "trash" and confirm_deletes:
-                    confirmation = confirm_trash(window)
-                    if confirmation is None:
-                        choice = None
-                    elif confirmation == "don't ask again":
-                        disable_delete_confirmation()
-                        confirm_deletes = False
-                if choice is not None:
-                    try:
-                        if choice == "archive":
-                            destination = archive_session(entry)
-                            try:
-                                record_action("archive", entry, destination)
-                            except OSError as error:
-                                status = f"Archived; action log unavailable: {error}"
-                        else:
-                            trash_session(entry)
-                            try:
-                                record_action("trash", entry)
-                            except OSError as error:
-                                status = f"Trashed; action log unavailable: {error}"
-                    except OSError as error:
-                        status = str(error)
-                    else:
-                        sessions.remove(entry)
-                        view_key = None
-                        if browser.detail is not None and entry in browser.detail[1]:
-                            browser.detail[1].remove(entry)
-            elif key == ord("f"):
-                available = ["all", *sorted({session.source for session in sessions})]
-                choice = choose(window, "Source", available, source_filter)
-                if choice is not None:
-                    if browser.detail is None and items:
-                        browser.pending_anchor = item_key(items[browser.selected])
-                    source_filter = choice
-                    refresh_view()
-            elif browser.detail is not None and key == ord("s"):
-                choice = choose(
-                    window, "Sort sessions", ["size", "date", "name"], sort_by
-                )
-                if choice is not None:
-                    browser.pending_anchor = (
-                        row_id(display_entries[browser.selected][0])
-                        if display_entries
-                        else None
-                    )
-                    sort_by = choice
-            elif browser.detail is None and key == ord("s"):
-                choice = choose(
-                    window, "Sort", ["size", "date", "count", "name"], sort_by
-                )
-                if choice is not None:
-                    browser.pending_anchor = (
-                        item_key(items[browser.selected]) if items else None
-                    )
-                    sort_by = choice
-            elif browser.detail is None and key in (curses.KEY_ENTER, 10, 13):
-                if mode == "cwd":
-                    if not items:
-                        continue
-                    kind, name, entries = items[browser.selected]
-                    if kind == "folder":
-                        browser.visit_folder(
-                            browser.cwd_node / name, item_key(items[browser.selected])
-                        )
-                        continue
-                    else:
-                        open_brief(
-                            window, entries[0], tree_entries if tree_mode else visible
-                        )
-                        continue
-                else:
-                    if not items:
-                        continue
-                    _, name, entries = items[browser.selected]
-                    browser.detail = (name, entries)
-                    browser.detail_return = (
-                        item_key(items[browser.selected]),
-                        browser.offset,
-                    )
-                    tree_entries = tree_with_ancestors(entries, grouped_visible)
-                    tree_mode, collapsed_nodes = browser.open_group(
-                        mode, name, source_filter, browser.cwd_node, tree_entries
-                    )
-                browser.selected, browser.offset = 0, 0
-            elif (
-                browser.detail is None
-                and mode == "cwd"
-                and key in (curses.KEY_BACKSPACE, 127, 8)
-            ):
-                if browser.cwd_node != cwd_root:
-                    browser.visit_folder(
-                        browser.cwd_node.parent,
-                        item_key(items[browser.selected]) if items else None,
-                    )
-            elif browser.detail is not None and key in (curses.KEY_BACKSPACE, 127, 8):
-                browser.leave_detail()
-            elif browser.detail is not None and key in (
-                ord("i"),
-                curses.KEY_ENTER,
-                10,
-                13,
-            ):
-                entry = display_entries[browser.selected][0]
-                open_brief(window, entry, tree_entries if tree_mode else visible)
 
     try:
         curses.wrapper(run)
@@ -1785,6 +1843,16 @@ def clear_terminal() -> None:
     if stream.isatty():
         stream.write("\033[0m\033[?25h\033[2J\033[H")
         stream.flush()
+
+
+def default_codex_root() -> Path:
+    home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+    return home.expanduser() / "sessions"
+
+
+def default_claude_root() -> Path:
+    home = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+    return home.expanduser() / "projects"
 
 
 def main() -> int:
@@ -1804,7 +1872,7 @@ def run_main() -> int:
     parser = argparse.ArgumentParser(
         description="ncdu-style browser for local agent session storage."
     )
-    parser.add_argument("--version", action="version", version="asdu 0.2.0")
+    parser.add_argument("--version", action="version", version="asdu 0.3.0")
     parser.add_argument(
         "command",
         nargs="?",
@@ -1814,13 +1882,13 @@ def run_main() -> int:
     parser.add_argument(
         "--codex-root",
         type=Path,
-        default=Path.home() / ".codex" / "sessions",
+        default=default_codex_root(),
         help="Codex session storage directory",
     )
     parser.add_argument(
         "--claude-root",
         type=Path,
-        default=Path.home() / ".claude" / "projects",
+        default=default_claude_root(),
         help="Claude session storage directory",
     )
     parser.add_argument(
@@ -1879,9 +1947,9 @@ def run_main() -> int:
         help="Rescan every transcript instead of using the keyword cache",
     )
     parser.add_argument(
-        "--confirm-delete",
+        "--confirm-trash",
         action="store_true",
-        help="Ask before deletion even when confirmation was disabled",
+        help="Ask before Claude Trash even when confirmation was disabled",
     )
     parser.add_argument(
         "--ascii",
@@ -1920,13 +1988,10 @@ def run_main() -> int:
         )
     scope = None if args.all else (args.project or Path.cwd()).resolve()
 
-    scan_warning = ""
-
     def scan_current(
         show_progress: bool,
         render: Callable[[str, int, int, int, int], None] | None = None,
     ) -> list[Session]:
-        nonlocal scan_warning
         progress = ScanProgress(
             show_progress
             and (
@@ -1946,13 +2011,10 @@ def run_main() -> int:
             sources, adapters, rules, args.content_keywords, progress, cache, scope
         )
         progress.finish()
-        scan_warning = progress.notice()
         found = [session for session in found if in_scope(session, scope)]
         return found
 
     sessions = scan_current(True)
-    if scan_warning and args.command != "browse":
-        print(scan_warning, file=sys.stderr)
 
     if args.command == "summary":
         print_summary(sessions, args.group, args.sort)
@@ -1983,9 +2045,8 @@ def run_main() -> int:
             args.group,
             args.sort,
             scope,
-            args.confirm_delete or not skip_delete_confirmation(),
+            args.confirm_trash or not skip_trash_confirmation(),
             lambda render: scan_current(True, render),
-            lambda: scan_warning,
             no_color=args.no_color,
         )
     return 0
