@@ -11,11 +11,10 @@
             agent session disk usage
 ```
 
-`asdu` shows how much disk space your Codex, Claude, and OMP sessions use.
-Browse by tag, folder, source, or session type. Open a brief to review a
-conversation. See how to resume it. Archive or remove supported sessions.
+`asdu` shows where Codex, Claude, and OMP sessions use disk space.
 
-`asdu` reads local session files. It does not send their contents anywhere.
+It works like a file browser. Start in a folder, inspect its sessions, and move
+up or down the directory tree. Everything stays local.
 
 ## Install
 
@@ -34,58 +33,54 @@ uv tool install --force 'git+https://github.com/tekkac/asdu.git'
 
 ## Use
 
-Run `asdu` inside a project to see its sessions.
+Run `asdu` inside any project:
 
 ```sh
 asdu
 ```
 
-Show sessions stored under your home directory and use message text for tags:
+Start somewhere else:
 
 ```sh
-asdu --project ~/ --content-keywords
+asdu --project ~/
 ```
 
-`--project` limits results to sessions whose working directory is inside that
-folder. `--content-keywords` also checks user messages when assigning tags.
-The first scan can take longer.
+The initial view shows folders. Press `g` for one flat list, then sources
+of sessions in the current folder. Press `t` to show session trees; they open
+folded.
 
-Use the arrow keys to move. Press `Enter` to open and `Backspace` to return.
+```text
+ asdu  ~/Code/demo                         143.9 MiB  12 sessions  size↓
+›   74.2 MiB  ████████████                         6  /api
+    38.1 MiB  ██████▏░░░░░                         3  /docs
 
-- `g` changes the grouping.
+    23.5 MiB  ███▊░░░░░░░░  codex   main        now  ▸ Fix flaky tests (+2)
+     8.1 MiB  █▎░░░░░░░░░░  claude  main     12m ago  Review the release notes
+
+ codex 019bcb82-bef5-7503 | 2026-09-09 11:52 | ~/.codex/sessions/…jsonl
+ Enter open  Backspace back  a action  t tree  / find  g group  f source  F type  s sort  ? help  q quit
+```
+
+- Arrow keys select rows. In trees, `↑↓` select siblings and `←→` move between
+  parents and children.
+- `Enter` opens a folder or session brief.
+- `Backspace` goes back or moves to the parent folder.
+- `/` or `Ctrl-F` searches every scanned session by title, folder, or ID.
+- `g` switches between folder, source, and all-session views.
 - `f` filters by source.
+- `F` filters by session type: main, child, review, or `?` when unknown.
 - `s` changes the sort order.
-- `Ctrl-F` or `/` finds text. Use `n` and `N` for the next or previous match.
-- `t` shows session trees. Use `Space` to fold a branch.
-- `a` opens session actions.
+- `t` toggles trees. `Space` folds one branch and `z` folds or opens all.
+- `a` shows the actions supported by the selected source.
 - `r` rescans.
 - `q` quits.
 
-Press `?` for every key. Run `asdu --help` for command-line options.
+Press `?` for help. Run `asdu --help` for command-line options.
 
-## Session list
+## Session briefs
 
-```text
- asdu  .                                                               size↓
-
-     1.0 GiB  ████████████      8  /research
-   512.0 MiB  ██████░░░░░░      4  /web-app
-
-›   64.0 MiB  codex   main      1d ago  ▾ Fix one flaky test (+2)
-    16.0 MiB  codex   child     1d ago    ├─ Find the race condition
-     8.0 MiB  codex   child     1d ago    └─ Remove the lucky sleep
-    18.2 MiB  claude  main      2h ago  Center the login form
-     9.7 KiB  omp     main     29d ago  Check the build
-
- Transcripts: 1.6 GiB  16 sessions
- Enter open  g group  f filter  s sort  Ctrl-F find  t tree  a action  ? help
-```
-
-Sizes refer to saved conversations, not project files.
-
-## Session brief
-
-Press `Enter` on a session:
+Press `Enter` on a session to see its folder, size, ID, activity, recent request,
+last reply, and resume command.
 
 ```text
  Center the login form
@@ -105,38 +100,33 @@ Folder: /demo/web-app
 ╰
 
 ID: demo-css-001
-Tags: development
 Resume: claude --resume demo-css-001
 ```
 
-The brief shows the folder, tags, session ID, recent messages, and a resume
-command when available. It may also show the model or live-session commands.
-`asdu` displays these commands but does not run them.
-
 ## Session actions
 
-Browsing does not change any files. Select a session and press `a` to see its
-available actions.
+Browsing never changes a session. Press `a` to review an action before it runs.
 
-- Codex sessions can be archived, restored, or deleted through Codex.
-- Claude sessions can be compressed into an archive or moved to Trash.
-- `asdu` does not modify OMP sessions.
+Codex archive and restore use Codex itself. Codex delete is permanent. Claude
+sessions can move to the system Trash. Tree actions include folded descendants.
+Active Claude sessions are refused.
 
-Deleting a Codex session is permanent and always requires confirmation. Close
-a Claude session before archiving it or moving it to Trash.
+Successful actions append a content-free record to
+`$XDG_STATE_HOME/asdu/actions.jsonl`, normally
+`~/.local/state/asdu/actions.jsonl`.
 
 ## Contributing
 
 Bug reports, UI improvements, and new session sources are welcome. Keep changes
-small. Use fictional session data in tests.
+small and use fictional session data in tests.
 
 ```sh
-uv run asdu.py
-python3 -m unittest discover -s tests
+uv run pytest
+uv run ruff check .
 ```
 
-New sources should start without file-changing actions. Add those actions only
-after the source provides a safe way to perform them.
+New sources start read-only. Add file-changing actions only when their lifecycle
+is understood and tested.
 
 ## License
 

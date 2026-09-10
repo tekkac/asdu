@@ -1,69 +1,18 @@
-"""Local transcript readers, deterministic tags, and explicit storage actions."""
+"""Local transcript readers and explicit storage actions."""
 
 from __future__ import annotations
 
-import gzip
 import io
 import json
 import os
 import re
-import shutil
-import tempfile
-import tomllib
 from collections import Counter
-from dataclasses import dataclass, replace
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Iterable, Protocol
-
-DEFAULT_TAGS = [
-    {
-        "name": "research",
-        "keywords": ["literature review", "research question", "proof sketch", "arxiv"],
-    },
-    {
-        "name": "tooling",
-        "keywords": ["mcp server", "agent skill", "plugin", "command line tool"],
-    },
-    {
-        "name": "operations",
-        "keywords": ["deployment", "docker", "kubernetes", "terraform"],
-    },
-    {
-        "name": "security",
-        "keywords": [
-            "security audit",
-            "vulnerability",
-            "threat model",
-            "cryptographic",
-        ],
-    },
-    {
-        "name": "development",
-        "keywords": ["implement", "test failure", "debug", "code review"],
-    },
-    {
-        "name": "data",
-        "keywords": [
-            "sql query",
-            "data pipeline",
-            "dataset",
-            "jupyter notebook",
-            "dataframe",
-        ],
-    },
-    {
-        "name": "documentation",
-        "keywords": [
-            "write documentation",
-            "update readme",
-            "release notes",
-            "documentation guide",
-            "api reference",
-        ],
-    },
-]
+from typing import Protocol
 
 
 class ScanReporter(Protocol):
@@ -92,13 +41,8 @@ class BriefData:
     forked_from: str
     providers: list[str] = dataclass_field(default_factory=list)
     latest_model: str = ""
-
-
-@dataclass(frozen=True)
-class TagRule:
-    name: str
-    paths: tuple[str, ...] = ()
-    keywords: tuple[str, ...] = ()
+    user_messages: int = 0
+    assistant_messages: int = 0
 
 
 @dataclass(frozen=True)
@@ -112,7 +56,6 @@ class Session:
     session_id: str
     parent_id: str | None
     title: str
-    tags: tuple[str, ...]
     task_path: str = ""
     forked_from: str = ""
     archived: bool = False
@@ -152,79 +95,6 @@ class ActionResult:
     replacement: Session | None = None
 
 
-class ContentCache:
-    """Cache source-aware user-message keyword results outside session stores."""
-
-    EXTRACTOR_VERSION = 4
-
-    def __init__(self, enabled: bool) -> None:
-        self.enabled = enabled
-        cache_home = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
-        self.path = cache_home / "asdu" / "content-keywords-v3.json"
-        self.entries: dict[str, dict[str, object]] = {}
-        if not enabled:
-            return
-        try:
-            with self.path.open(encoding="utf-8") as handle:
-                data = json.load(handle)
-            self.entries = data.get("entries", {}) if isinstance(data, dict) else {}
-        except (OSError, json.JSONDecodeError):
-            pass
-
-    def get(self, path: Path, source: str, keywords: set[str]) -> set[str] | None:
-        if not self.enabled:
-            return None
-        try:
-            stat = path.stat()
-        except OSError:
-            return None
-        entry = self.entries.get(str(path))
-        if (
-            not isinstance(entry, dict)
-            or entry.get("size") != stat.st_size
-            or entry.get("mtime_ns") != stat.st_mtime_ns
-        ):
-            return None
-        if (
-            entry.get("source") != source
-            or entry.get("extractor_version") != self.EXTRACTOR_VERSION
-            or entry.get("keywords") != sorted(keywords)
-            or not isinstance(entry.get("matches"), list)
-        ):
-            return None
-        return {value for value in entry["matches"] if isinstance(value, str)}
-
-    def put(
-        self, path: Path, source: str, keywords: set[str], matches: set[str]
-    ) -> None:
-        if not self.enabled:
-            return
-        try:
-            stat = path.stat()
-        except OSError:
-            return
-        self.entries[str(path)] = {
-            "size": stat.st_size,
-            "mtime_ns": stat.st_mtime_ns,
-            "source": source,
-            "extractor_version": self.EXTRACTOR_VERSION,
-            "keywords": sorted(keywords),
-            "matches": sorted(matches),
-        }
-
-    def save(self) -> None:
-        if not self.enabled:
-            return
-        try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = self.path.with_suffix(".tmp")
-            with temporary.open("w", encoding="utf-8") as handle:
-                json.dump({"entries": self.entries}, handle, separators=(",", ":"))
-            temporary.replace(self.path)
-        except OSError:
-            pass
-
-
 def session_label(session: Session) -> str:
     """Keep an untitled marker for briefs, not the space-constrained list."""
     if session.task_path:
@@ -232,48 +102,12 @@ def session_label(session: Session) -> str:
     return re.sub(r"^untitled\s+[—-]\s*", "", session.title, count=1) or session.title
 
 
-def load_tag_rules(config: Path | None) -> list[TagRule]:
-    # Built-ins are small, portable, and high-confidence.  A TOML file
-    # deliberately replaces them with stable, user-owned rules.
-    raw_rules: list[dict] = DEFAULT_TAGS
-    if config is not None:
-        with config.open("rb") as handle:
-            data = tomllib.load(handle)
-        raw_rules = data.get("tag", [])
-        if not isinstance(raw_rules, list):
-            raise ValueError("config key 'tag' must be an array of tables")
-
-    rules: list[TagRule] = []
-    for item in raw_rules:
-        if not isinstance(item, dict):
-            raise ValueError("each tag must be a table")
-        for field in ("paths", "keywords"):
-            values = item.get(field, [])
-            if not isinstance(values, list) or any(
-                not isinstance(value, str) for value in values
-            ):
-                raise ValueError(f"tag {field} must be a list of strings")
-        name = str(item.get("name", "")).strip()
-        if not name:
-            raise ValueError("every tag needs a non-empty name")
-        rules.append(
-            TagRule(
-                name=name,
-                paths=tuple(str(value).casefold() for value in item.get("paths", [])),
-                keywords=tuple(
-                    str(value).casefold() for value in item.get("keywords", [])
-                ),
-            )
-        )
-    return rules
-
-
 def iter_jsonl(
     path: Path, limit: int | None = None, progress: ScanReporter | None = None
 ) -> Iterable[dict[str, object]]:
     """Yield valid JSON object records; changing transcripts remain harmless."""
     try:
-        with path.open(encoding="utf-8", errors="replace") as handle:
+        with open_transcript(path, "rt") as handle:
             for index, line in enumerate(handle):
                 if limit is not None and index >= limit:
                     break
@@ -296,6 +130,14 @@ def untitled_title(first_request: str) -> str:
     if first_request == "untitled":
         return "?"
     return f"untitled — {first_request[:1024]}"
+
+
+def open_transcript(path: Path, mode: str):
+    """Open one source-owned JSONL transcript."""
+    return path.open(
+        mode,
+        **({"encoding": "utf-8", "errors": "replace"} if "t" in mode else {}),
+    )
 
 
 def content_text(content: object) -> str:
@@ -358,7 +200,7 @@ def substantive_user_text(text: str) -> str:
 def preview_transcript(path: Path) -> io.StringIO:
     """Sample complete records at both ends; never read an unbounded JSONL line."""
     limit = 128 * 1024
-    with path.open("rb") as handle:
+    with open_transcript(path, "rb") as handle:
         size = handle.seek(0, os.SEEK_END)
         handle.seek(0)
         head = handle.read(limit)
@@ -370,101 +212,14 @@ def preview_transcript(path: Path) -> io.StringIO:
     return io.StringIO((head + b"\n" + b"".join(tail)).decode("utf-8", "replace"))
 
 
-def transcript_keywords(
-    path: Path,
-    read_users: Callable[[dict], Iterable[str]],
-    clean_user_text: Callable[[str], str],
-    keywords: set[str],
-    report_bytes: Callable[[int], None] | None = None,
-) -> set[str]:
-    """Mine only source-recognized user messages, streaming one JSONL file."""
-    remaining = {keyword.casefold() for keyword in keywords if keyword}
-    found: set[str] = set()
-    if not remaining:
-        return found
-    try:
-        with path.open("rb") as handle:
-            scanned, next_report = 0, 1024 * 1024
-            for raw_line in handle:
-                scanned += len(raw_line)
-                if report_bytes is not None and scanned >= next_report:
-                    report_bytes(scanned)
-                    next_report = scanned + 1024 * 1024
-                line = raw_line.decode("utf-8", errors="replace")
-                try:
-                    item = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(item, dict):
-                    continue
-                for text in read_users(item):
-                    clean = clean_user_text(text).casefold()
-                    matched = {keyword for keyword in remaining if keyword in clean}
-                    found.update(matched)
-                    remaining.difference_update(matched)
-                if not remaining:
-                    break
-            if report_bytes is not None:
-                report_bytes(scanned)
-    except OSError:
-        pass
-    return found
-
-
-def cached_transcript_keywords(
-    path: Path,
-    source: str,
-    read_users: Callable[[dict], Iterable[str]],
-    clean_user_text: Callable[[str], str],
-    keywords: set[str],
-    cache: ContentCache,
-    report_bytes: Callable[[int], None] | None = None,
-) -> set[str]:
-    cached = cache.get(path, source, keywords)
-    if cached is not None:
-        return cached
-    matches = transcript_keywords(
-        path, read_users, clean_user_text, keywords, report_bytes
-    )
-    cache.put(path, source, keywords, matches)
-    return matches
-
-
-def classify(
-    session: Session, rules: list[TagRule], content_matches: set[str]
-) -> tuple[str, ...]:
-    haystack = f"{session.cwd} {session.title}".casefold()
-    tags: list[str] = []
-    for rule in rules:
-        path_match = any(
-            value.casefold() in session.cwd.casefold() for value in rule.paths
-        )
-        keyword_match = any(value.casefold() in haystack for value in rule.keywords)
-        if not keyword_match:
-            keyword_match = any(
-                value.casefold() in content_matches for value in rule.keywords
-            )
-        if path_match or keyword_match:
-            tags.append(rule.name)
-    return tuple(tags) or ("untagged",)
-
-
 def scan_paths(
-    source: str,
     label: str,
     paths: Iterable[Path],
     inspect: Callable[[Path], Session | None],
-    rules: list[TagRule],
-    content_keywords: bool,
     progress: ScanReporter,
-    cache: ContentCache,
-    scope: Path | None,
-    read_users: Callable[[dict], Iterable[str]] | None = None,
-    clean_user_text: Callable[[str], str] | None = None,
 ) -> list[Session]:
-    """Apply the same scope, cache, progress, and classification rules to every source."""
+    """Inspect paths while reporting bounded file and byte progress."""
     discovered = list(paths)
-    keywords = {keyword for rule in rules for keyword in rule.keywords}
     sizes: list[int] = []
     for path in discovered:
         try:
@@ -481,33 +236,7 @@ def scan_paths(
             progress.skipped.add(path)
             progress.update(label, index, len(discovered), done_bytes, total_bytes)
             continue
-        if not in_scope(session, scope):
-            if session.cwd == "(unknown)":
-                progress.skipped.add(path)
-            progress.update(label, index, len(discovered), done_bytes, total_bytes)
-            continue
-        if content_keywords and (read_users is None or clean_user_text is None):
-            raise ValueError("content keyword scanning requires a source reader")
-        if content_keywords:
-            assert read_users is not None and clean_user_text is not None
-            matches = cached_transcript_keywords(
-                path,
-                source,
-                read_users,
-                clean_user_text,
-                keywords,
-                cache,
-                lambda scanned: progress.update(
-                    label,
-                    index,
-                    len(discovered),
-                    done_bytes - size + scanned,
-                    total_bytes,
-                ),
-            )
-        else:
-            matches = set()
-        sessions.append(replace(session, tags=classify(session, rules, matches)))
+        sessions.append(session)
         progress.update(label, index, len(discovered), done_bytes, total_bytes)
     return sessions
 
@@ -548,34 +277,6 @@ def trash_session(session: Session) -> None:
     move_to_trash(session.path)
 
 
-def archive_session(session: Session) -> Path:
-    """Compress one transcript into a user-owned archive and remove it."""
-    day = datetime.now().astimezone().strftime("%Y-%m-%d")
-    data_home = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
-    directory = data_home / "asdu" / "archive" / day / session.source
-    directory.mkdir(parents=True, exist_ok=True)
-    fd, name = tempfile.mkstemp(prefix="session-", suffix=".jsonl.gz", dir=directory)
-    os.close(fd)
-    destination = Path(name)
-    try:
-        require_unchanged(session)
-        with (
-            session.path.open("rb") as source,
-            gzip.open(destination, "wb") as archived,
-        ):
-            shutil.copyfileobj(source, archived, length=1024 * 1024)
-        require_unchanged(session)
-        session.path.unlink()
-        return destination
-    except (OSError, KeyboardInterrupt):
-        try:
-            if session.path.exists():
-                destination.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
-
-
 def action_log_path() -> Path:
     """Return the local, append-only record of successful storage actions."""
     state_home = Path(
@@ -604,29 +305,6 @@ def record_action(
         output.write(json.dumps(event, separators=(",", ":")) + "\n")
 
 
-def settings_path() -> Path:
-    config_home = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
-    return config_home / "asdu" / "settings.json"
-
-
-def skip_trash_confirmation() -> bool:
-    try:
-        with settings_path().open(encoding="utf-8") as handle:
-            return bool(json.load(handle).get("skip_trash_confirmation"))
-    except (OSError, json.JSONDecodeError, AttributeError):
-        return False
-
-
-def disable_trash_confirmation() -> None:
-    try:
-        path = settings_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8") as handle:
-            json.dump({"skip_trash_confirmation": True}, handle)
-    except OSError:
-        pass
-
-
 def read_jsonl_brief(
     session: Session,
     read_users: Callable[[dict], Iterable[str]],
@@ -643,7 +321,7 @@ def read_jsonl_brief(
     with (
         preview_transcript(session.path)
         if preview
-        else session.path.open(encoding="utf-8", errors="replace")
+        else open_transcript(session.path, "rt")
     ) as handle:
         for index, line in enumerate(handle):
             if poll is not None and index % 128 == 0:
@@ -657,11 +335,18 @@ def read_jsonl_brief(
             data.event_counts[str(item.get("type", "unknown"))] += 1
             if enrich is not None:
                 enrich(item, data)
+            found_user = False
             for text in read_users(item):
                 clean = clean_user_text(text)
                 if clean:
+                    found_user = True
                     data.first_user = data.first_user or clean
                     data.latest_user = clean
+            data.user_messages += found_user
+            found_assistant = False
             for text in read_assistant(item):
-                data.latest_reply = text
+                if text:
+                    found_assistant = True
+                    data.latest_reply = text
+            data.assistant_messages += found_assistant
     return data

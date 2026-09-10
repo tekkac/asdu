@@ -2,18 +2,15 @@
 
 import json
 import subprocess
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 from asdu_sessions import (
     ActionResult,
-    ContentCache,
     ScanReporter,
     Session,
     SessionCommand,
     SessionControls,
-    TagRule,
-    archive_session,
     iter_jsonl,
     message_texts,
     preview_transcript,
@@ -25,27 +22,60 @@ from asdu_sessions import (
 )
 
 
-def available_actions(_session: Session) -> frozenset[str]:
-    return frozenset({"archive", "trash"})
+def available_actions(session: Session) -> frozenset[str]:
+    return frozenset({"trash"})
+
+
+def list_agents(include_completed: bool = False, required: bool = False) -> list[dict]:
+    """Read Claude's native runtime registry with bounded, noninteractive I/O."""
+    command = ["claude", "agents", "--json"]
+    if include_completed:
+        command.append("--all")
+    try:
+        result = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+        agents = json.loads(result.stdout) if result.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as error:
+        if required:
+            raise OSError("could not verify active Claude sessions") from error
+        return []
+    if not isinstance(agents, list):
+        if required:
+            raise OSError("could not verify active Claude sessions")
+        return []
+    return [agent for agent in agents if isinstance(agent, dict)]
+
+
+def active_session_ids() -> set[str]:
+    identities = set()
+    for agent in list_agents(required=True):
+        for field in ("id", "sessionId"):
+            identity = agent.get(field)
+            if isinstance(identity, str) and identity:
+                identities.add(identity)
+    return identities
+
+
+def prepare_actions(sessions: list[Session], action: str) -> None:
+    candidates = [session for session in sessions if action == "trash"]
+    if not candidates:
+        return
+    active = active_session_ids()
+    if any(session.session_id in active for session in candidates):
+        raise OSError("refusing to change an active Claude session; stop it first")
 
 
 def background_agent(session: Session) -> dict | None:
     """Read daemon state only when one session's brief requests it."""
     if session.origin in ("subagent", "sidechain"):
         return None
-    try:
-        result = subprocess.run(
-            ["claude", "agents", "--json", "--all"],
-            capture_output=True,
-            text=True,
-            timeout=2,
-            check=False,
-        )
-        agents = json.loads(result.stdout) if result.returncode == 0 else []
-    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
-        return None
-    if not isinstance(agents, list):
-        return None
+    agents = list_agents(include_completed=True)
     return next(
         (
             agent
@@ -116,24 +146,22 @@ def custom_title(path: Path) -> str:
 
 def session_paths(root: Path) -> Iterable[Path]:
     """Yield project transcripts and their native subagent transcripts only."""
-    yield from root.glob("*.jsonl")
-    yield from root.glob("*/*.jsonl")
-    yield from root.glob("*/subagents/*.jsonl")
-    yield from root.glob("*/*/subagents/*.jsonl")
+    patterns = (
+        "*.jsonl",
+        "*/*.jsonl",
+        "*/subagents/*.jsonl",
+        "*/*/subagents/*.jsonl",
+    )
+    for pattern in patterns:
+        yield from root.glob(pattern)
 
 
-def discover(
-    root: Path,
-    rules: list[TagRule],
-    content_keywords: bool,
-    progress: ScanReporter,
-    cache: ContentCache,
-    scope: Path | None,
-) -> list[Session]:
+def discover(root: Path, progress: ScanReporter) -> list[Session]:
     """Small native Claude reader: CWD + session id live in normal JSONL events."""
 
     def inspect(path: Path) -> Session | None:
-        cwd, session_id, origin, parent_id = "(unknown)", path.stem, "unknown", None
+        fallback_id = path.stem
+        cwd, session_id, origin, parent_id = "(unknown)", fallback_id, "unknown", None
         renamed = custom_title(path)
         title = renamed or "untitled"
         fallback = ""
@@ -193,21 +221,14 @@ def discover(
             session_id,
             parent_id,
             title,
-            (),
+            source_home=str(root),
         )
 
     return scan_paths(
-        "claude",
         "Claude",
         session_paths(root),
         inspect,
-        rules,
-        content_keywords,
         progress,
-        cache,
-        scope,
-        user_texts,
-        clean_user_text,
     )
 
 
@@ -273,8 +294,6 @@ def load_brief(session, poll=None, preview=False):
 
 
 def perform_action(session, action):
-    if action == "archive":
-        return ActionResult(destination=archive_session(session))
     if action == "trash":
         trash_session(session)
         return ActionResult()

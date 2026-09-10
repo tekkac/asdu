@@ -32,8 +32,9 @@ sessions.
 _Avoid_: Plugin, provider
 
 **Session action**:
-A reviewed archive, unarchive, trash, or delete operation supported by the
-source that owns a session.
+A reviewed lifecycle operation supported by the source that owns a session.
+Codex provides archive, restore, and delete. Claude session files can move to
+the system Trash.
 
 **Runtime agent**:
 A live or background execution associated with a stored session. Its short ID

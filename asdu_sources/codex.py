@@ -2,19 +2,17 @@
 
 import os
 import subprocess
+from collections.abc import Iterable
 from dataclasses import replace
 from pathlib import Path
-from typing import Iterable
+from uuid import UUID
 
 from asdu_sessions import (
     ActionResult,
-    ContentCache,
     ScanReporter,
     Session,
     SessionCommand,
     SessionControls,
-    TagRule,
-    in_scope,
     iter_jsonl,
     message_texts,
     read_jsonl_brief,
@@ -31,10 +29,18 @@ def available_actions(session: Session) -> frozenset[str]:
     return frozenset({"archive", "delete"})
 
 
+def valid_session_id(identifier: str) -> bool:
+    """Codex mutations require the canonical UUID recorded by session metadata."""
+    try:
+        return str(UUID(identifier)) == identifier.lower()
+    except (ValueError, AttributeError):
+        return False
+
+
 def session_controls(session: Session) -> SessionControls:
     commands = (
         ()
-        if session.archived
+        if session.archived or not valid_session_id(session.session_id)
         else (SessionCommand("Resume", ("codex", "resume", session.session_id)),)
     )
     return SessionControls(commands)
@@ -44,6 +50,8 @@ def perform_action(session: Session, action: str) -> ActionResult:
     """Delegate lifecycle changes to the Codex store owner."""
     if action not in available_actions(session):
         raise OSError(f"Codex cannot {action} this session")
+    if not valid_session_id(session.session_id):
+        raise OSError("invalid Codex session ID; rescan before acting")
     command = ["codex", action, session.session_id]
     if action == "delete":
         command.insert(2, "--force")
@@ -53,11 +61,15 @@ def perform_action(session: Session, action: str) -> ActionResult:
     try:
         result = subprocess.run(
             command,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             env=environment,
+            timeout=10,
             check=False,
         )
+    except subprocess.TimeoutExpired as error:
+        raise OSError(f"Codex {action} timed out") from error
     except OSError as error:
         raise OSError(f"Could not run Codex: {error}") from error
     if result.returncode:
@@ -67,10 +79,22 @@ def perform_action(session: Session, action: str) -> ActionResult:
             + (f": {detail}" if detail else f" (exit {result.returncode})")
         )
     if action == "delete":
+        if session.path.exists():
+            raise OSError("Codex delete reported success but the session still exists")
         return ActionResult()
     home = Path(session.source_home) if session.source_home else session.path.parent
     root = home / ("archived_sessions" if action == "archive" else "sessions")
-    path = next(root.rglob(f"*{session.session_id}*.jsonl"), session.path)
+    matches = list(root.rglob(f"*{session.session_id}*.jsonl"))
+    state = "archived" if action == "archive" else "restored"
+    if len(matches) != 1:
+        raise OSError(
+            f"Codex {action} reported success but the {state} session was not found"
+        )
+    path = matches[0]
+    if path == session.path or session.path.exists():
+        raise OSError(
+            f"Codex {action} reported success but the original session still exists"
+        )
     replacement = replace(session, path=path, archived=action == "archive")
     return ActionResult(replacement=replacement)
 
@@ -166,14 +190,7 @@ def derive_title(path: Path) -> str:
     return f"reply: {fallback}" if fallback else "untitled"
 
 
-def discover(
-    root: Path,
-    rules: list[TagRule],
-    content_keywords: bool,
-    progress: ScanReporter,
-    cache: ContentCache,
-    scope: Path | None,
-) -> list[Session]:
+def discover(root: Path, progress: ScanReporter) -> list[Session]:
     # The normal root is ~/.codex/sessions, whose direct parent owns
     # session_index.jsonl. Custom roots simply use their direct parent too.
     titles = load_titles(root.parent)
@@ -199,13 +216,10 @@ def discover(
             session_id,
             parent_id,
             "",
-            (),
             *task_metadata(details),
             archived=path.is_relative_to(archived_root),
             source_home=str(root.parent),
         )
-        if not in_scope(session, scope):
-            return session
         title = (
             session_label(session)
             if session.task_path
@@ -217,17 +231,10 @@ def discover(
     if archived_root != root and archived_root.exists():
         paths.extend(archived_root.rglob("rollout-*.jsonl"))
     return scan_paths(
-        "codex",
         "Codex",
         paths,
         inspect,
-        rules,
-        content_keywords,
         progress,
-        cache,
-        scope,
-        user_texts,
-        clean_user_text,
     )
 
 

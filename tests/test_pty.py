@@ -45,7 +45,6 @@ class TerminalTests(unittest.TestCase):
             [
                 sys.executable,
                 str(ROOT / "asdu.py"),
-                "--all",
                 "--no-progress",
                 "--codex-root",
                 str(fixtures),
@@ -163,16 +162,17 @@ class TerminalTests(unittest.TestCase):
 import sys, os, json
 from pathlib import Path
 sys.path.insert(0, {str(ROOT)!r})
-import asdu
-entries = [asdu.Session(Path('/fictional'), 1, 0, 'codex', 'primary',
-    '/fictional', str(i), None, str(i), ('untagged',)) for i in range(9)]
-drain = asdu.drain_navigation
+import asdu_tui
+from asdu_sessions import Session
+entries = [Session(Path(f'/fictional/{{i}}'), 1, 0, 'codex', 'primary',
+    '/fictional', str(i), None, str(i)) for i in range(9)]
+drain = asdu_tui.drain_navigation
 def observed(*args):
     result = drain(*args)
     os.write({write_fd}, (json.dumps(result[0]) + '\\n').encode())
     return result
-asdu.drain_navigation = observed
-asdu.tui(entries, 'cwd', 'name', Path('/fictional'), True, lambda _: entries)
+asdu_tui.drain_navigation = observed
+asdu_tui.tui(entries, 'cwd', 'name', Path('/fictional'), lambda _: entries)
 """
         self.process = subprocess.Popen(
             [sys.executable, "-c", program],
@@ -180,9 +180,11 @@ asdu.tui(entries, 'cwd', 'name', Path('/fictional'), True, lambda _: entries)
             stdout=self.slave,
             stderr=self.slave,
             pass_fds=(write_fd,),
-            env=dict(os.environ, TERM="xterm-256color", ZELLIJ="1" if self.zellij else ""),
+            env=dict(
+                os.environ, TERM="xterm-256color", ZELLIJ="1" if self.zellij else ""
+            ),
         )
-        self.wait_for(b"help")
+        self.wait_for(b"find")
 
         def positions(seconds):
             self.read_for(seconds)
@@ -205,7 +207,7 @@ asdu.tui(entries, 'cwd', 'name', Path('/fictional'), True, lambda _: entries)
                 os.write(self.master, wheel * 3)
                 self.assertEqual(positions(0.05), [])
             os.write(self.master, opposite)
-            step = -1 if edge == 8 else 1
+            step = -1 if edge else 1
             self.assertEqual(positions(0.05)[-1], expected + step)
             positions(0.3)
             os.write(self.master, wheel)

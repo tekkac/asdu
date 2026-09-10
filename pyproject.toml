@@ -4,16 +4,19 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "asdu"
-version = "0.3.0"
+version = "0.4.0"
 description = "A local terminal browser for coding-agent session storage"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 dependencies = ["send2trash>=1.8.3"]
 
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.9"]
+
 [project.scripts]
 asdu = "asdu:main"
 
 [tool.setuptools]
-py-modules = ["asdu", "asdu_sessions", "asdu_browser"]
+py-modules = ["asdu", "asdu_tui", "asdu_views", "asdu_sessions", "asdu_browser"]
 packages = ["asdu_sources"]

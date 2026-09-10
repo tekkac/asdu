@@ -50,7 +50,7 @@ def assistant_texts(item):
     return message_texts(message)
 
 
-def discover(root, rules, content_keywords, progress, cache, scope):
+def discover(root, progress):
     def inspect(path):
         metadata, title, first, reply = {}, "", "", ""
         origin = "primary"
@@ -100,21 +100,13 @@ def discover(root, rules, content_keywords, progress, cache, scope):
             parent if isinstance(parent, str) and parent else None,
             title
             or untitled_title(first or (f"reply: {reply}" if reply else "untitled")),
-            (),
         )
 
     sessions = scan_paths(
-        "omp",
         "OMP",
         root.rglob("*.jsonl"),
         inspect,
-        rules,
-        content_keywords,
         progress,
-        cache,
-        scope,
-        user_texts,
-        clean_user_text,
     )
     return link_children(sessions)
 

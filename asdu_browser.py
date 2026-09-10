@@ -3,46 +3,50 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
 
 from asdu_sessions import Session, in_scope, session_label
 
-ALL_SESSIONS = "__asdu_all_sessions__"
 
-
-def primary_tag(session: Session) -> str:
-    return session.tags[0]
+def session_type(session: Session) -> str:
+    """Return the small structural type vocabulary exposed by the filter."""
+    return {
+        "primary": "main",
+        "subagent": "child",
+        "sidechain": "child",
+        "review": "review",
+    }.get(session.origin, session.origin)
 
 
 def group_sessions(sessions: Iterable[Session], mode: str) -> dict[str, list[Session]]:
     groups: dict[str, list[Session]] = defaultdict(list)
     for session in sessions:
-        if mode == "tag":
-            key = primary_tag(session)
-        elif mode == "source":
-            key = session.source
-        elif mode == "origin":
-            key = session.origin
-        else:
-            key = session.cwd
-        groups[key].append(session)
+        groups[session.source if mode == "source" else session.cwd].append(session)
     return groups
 
 
 def browser_visible_sessions(
-    sessions: list[Session], source_filter: str, mode: str, cwd_node: Path
+    sessions: list[Session],
+    source_filter: str,
+    type_filter: str,
+    mode: str,
+    cwd_node: Path,
 ) -> tuple[list[Session], list[Session]]:
-    """Apply the TUI's source filter and virtual-folder scope in one place."""
-    visible = (
-        sessions
-        if source_filter == "all"
-        else [session for session in sessions if session.source == source_filter]
-    )
-    return visible, visible if mode == "cwd" else [
-        session for session in visible if in_scope(session, cwd_node)
+    """Compose filters, then apply virtual-folder scope for grouped views."""
+    visible = [
+        session
+        for session in sessions
+        if (source_filter == "all" or session.source == source_filter)
+        and (type_filter == "all" or session_type(session) == type_filter)
     ]
+    grouped = (
+        visible
+        if cwd_node == Path("/")
+        else [session for session in visible if in_scope(session, cwd_node)]
+    )
+    return visible, visible if mode == "cwd" else grouped
 
 
 def item_key(item: tuple[str, str, list[Session]]) -> str:
@@ -53,21 +57,11 @@ def item_key(item: tuple[str, str, list[Session]]) -> str:
 def browser_group_items(
     sessions: list[Session], mode: str, sort_by: str
 ) -> list[tuple[str, str, list[Session]]]:
-    """Build virtual group rows; /all sessions is navigation, never a tag."""
-    items = [
+    """Build virtual group rows."""
+    return [
         ("group", name, entries)
         for name, entries in ordered_groups(group_sessions(sessions, mode), sort_by)
     ]
-    if mode == "tag" and sessions:
-        items.insert(0, ("group", ALL_SESSIONS, sessions))
-    return items
-
-
-def group_label(name: str, mode: str) -> str:
-    """Render virtual and provenance groups without exposing internal keys."""
-    if name == ALL_SESSIONS:
-        return "all sessions"
-    return origin_label(name) if mode == "origin" else name
 
 
 def sort_label(sort_by: str) -> str:
@@ -105,6 +99,8 @@ def cwd_listing(
     direct: list[Session] = []
     for session in sessions:
         if session.cwd == "(unknown)":
+            if directory == Path("/"):
+                folders["(unknown folder)"].append(session)
             continue
         try:
             relative = Path(session.cwd).resolve().relative_to(directory)
@@ -131,8 +127,12 @@ def relative_folder(directory: Path, root: Path) -> str:
     try:
         value = directory.relative_to(root)
     except ValueError:
-        return directory.name
-    return str(value) if str(value) != "." else "."
+        value = directory
+    text = str(value) if str(value) != "." else str(root)
+    home = str(Path.home())
+    return (
+        "~" + text[len(home) :] if text == home or text.startswith(home + "/") else text
+    )
 
 
 def ordered_sessions(sessions: Iterable[Session], sort_by: str) -> list[Session]:
@@ -163,13 +163,16 @@ def parent_links(entries: Iterable[Session]) -> dict[str, str]:
         if len(parents) == 1 and row_id(parents[0]) != row_id(entry):
             links[row_id(entry)] = row_id(parents[0])
     for start in list(links):
-        seen = set()
+        order: list[str] = []
+        seen: dict[str, int] = {}
         node = start
         while node in links:
             if node in seen:
-                del links[node]
+                for cycle_node in order[seen[node] :]:
+                    links.pop(cycle_node, None)
                 break
-            seen.add(node)
+            seen[node] = len(order)
+            order.append(node)
             node = links[node]
     return links
 
@@ -185,6 +188,26 @@ def subtree_stats(entries: Iterable[Session]) -> dict[str, tuple[int, int]]:
             totals[key][0] += entry.size
             totals[key][1] += 1
     return {key: (size, count) for key, (size, count) in totals.items()}
+
+
+def session_subtree(entries: Iterable[Session], root: Session) -> list[Session]:
+    """Return one complete lineage, descendants first so its root changes last."""
+    unique = {row_id(entry): entry for entry in entries}
+    root_id = row_id(root)
+    if root_id not in unique:
+        return [root]
+    children: dict[str, list[str]] = defaultdict(list)
+    for child, parent in parent_links(unique.values()).items():
+        children[parent].append(child)
+    result: list[Session] = []
+
+    def visit(identifier: str) -> None:
+        for child in children.get(identifier, []):
+            visit(child)
+        result.append(unique[identifier])
+
+    visit(root_id)
+    return result
 
 
 def session_tree(
@@ -241,10 +264,8 @@ def tree_with_ancestors(
 ) -> list[Session]:
     """Add native parents needed to render a selected group as a real tree.
 
-    A tag group is a view, not a conversation boundary: a parent can reasonably
-    classify as ``tooling`` while its workers classify as a project tag.  The
-    added sessions are structural context only; callers keep ``entries`` for
-    group totals and membership.
+    A folder or source view is not a conversation boundary. The added sessions
+    are structural context only; callers keep ``entries`` for view membership.
     """
     candidate_lists: dict[tuple[str, str], list[Session]] = defaultdict(list)
     for entry in candidates:
@@ -304,9 +325,9 @@ def folded_tree_nodes(entries: Iterable[Session]) -> set[str]:
 class BrowserState:
     """Ephemeral per-run UI state, intentionally never serialized."""
 
-    tree_modes: set[tuple[str, str, str, str]]
-    tree_folds: dict[tuple[str, str, str, str], set[str]]
-    detail_key: tuple[str, str, str, str] | None = None
+    flat_modes: set[tuple[str, str, str, str, str]]
+    tree_folds: dict[tuple[str, str, str, str, str], set[str]]
+    detail_key: tuple[str, str, str, str, str] | None = None
     selected: int = 0
     offset: int = 0
     detail: tuple[str, list[Session]] | None = None
@@ -337,29 +358,32 @@ class BrowserState:
         mode: str,
         name: str,
         source_filter: str,
+        type_filter: str,
         cwd: Path,
         entries: Iterable[Session],
+        *,
+        tree_by_default: bool = True,
     ) -> tuple[bool, set[str]]:
-        key = (mode, name, source_filter, str(cwd))
+        key = (mode, name, source_filter, type_filter, str(cwd))
         self.detail_key = key
-        enabled = key in self.tree_modes
-        folds = (
-            self.tree_folds.setdefault(key, folded_tree_nodes(entries))
-            if enabled
-            else set()
-        )
+        if key not in self.tree_folds:
+            self.tree_folds[key] = folded_tree_nodes(entries)
+            if not tree_by_default:
+                self.flat_modes.add(key)
+        enabled = key not in self.flat_modes
+        folds = self.tree_folds[key] if enabled else set()
         return enabled, folds
 
     def toggle_tree(self, entries: Iterable[Session]) -> tuple[bool, set[str]]:
         if self.detail_key is None:
             return False, set()
-        if self.detail_key in self.tree_modes:
-            self.tree_modes.remove(self.detail_key)
-            return False, set()
-        self.tree_modes.add(self.detail_key)
-        return True, self.tree_folds.setdefault(
-            self.detail_key, folded_tree_nodes(entries)
-        )
+        if self.detail_key in self.flat_modes:
+            self.flat_modes.remove(self.detail_key)
+            return True, self.tree_folds.setdefault(
+                self.detail_key, folded_tree_nodes(entries)
+            )
+        self.flat_modes.add(self.detail_key)
+        return False, set()
 
     def close_group(self) -> None:
         self.detail_key = None
@@ -374,12 +398,25 @@ def find_match(labels: list[str], query: str, start: int, step: int = 1) -> int:
     return start
 
 
+def search_sessions(sessions: Iterable[Session], query: str) -> list[Session]:
+    """Search the complete scan by title, folder, or native ID prefix."""
+    needle = query.strip().casefold()
+    if not needle:
+        return []
+    return [
+        session
+        for session in sessions
+        if needle
+        in f"{session_label(session)}\n{session.cwd}\n{session.session_id}".casefold()
+    ]
+
+
 def origin_label(origin: str) -> str:
     return {
         "unknown": "?",  # Diagnostic marker while provenance coverage grows.
         "primary": "main",
         "subagent": "child",
-        "sidechain": "side",
+        "sidechain": "child",
         "automation": "auto",
         "user": "user",
         "review": "review",

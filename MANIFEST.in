@@ -1,2 +1,1 @@
-include asdu.toml.example
 recursive-include tests *.py *.jsonl
