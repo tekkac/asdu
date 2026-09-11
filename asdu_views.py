@@ -377,7 +377,7 @@ def session_column_header(width: int, show_folder: bool = False) -> str:
     columns += (
         f"{'source':<{SOURCE_COLUMN_WIDTH}}  "
         f"{'type':<{TYPE_COLUMN_WIDTH}}  "
-        f"{'updated':>{DATE_COLUMN_WIDTH}}  "
+        f"{'updated':<{DATE_COLUMN_WIDTH}}  "
     )
     return columns + ("folder / session" if show_folder else "session")
 
@@ -400,7 +400,7 @@ def draw_session_line(
     prefix = f"  {human_size(size):>{SIZE_COLUMN_WIDTH}}  {bar}"
     source = f"{session.source:<{SOURCE_COLUMN_WIDTH}}  "
     kind = f"{session_type_label(session):<{TYPE_COLUMN_WIDTH}}  "
-    date = f"{session_date(session):>{DATE_COLUMN_WIDTH}}  "
+    date = f"{session_date(session):<{DATE_COLUMN_WIDTH}}  "
     folder_text = f"{compact_path(folder, 24):<24}  " if folder else ""
     branch = terminal_art(branch)
     title_width = max(

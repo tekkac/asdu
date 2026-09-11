@@ -492,14 +492,14 @@ class RenderingTests(unittest.TestCase):
             self.assertEqual(line.count("█"), cells)
 
     def test_session_column_header_matches_rendered_columns(self):
-        entry = session("aligned", title="Aligned session")
+        entry = session("aligned", title="Aligned session", modified=time.time())
         screen = browse_screen([entry], [ord("q")], width=120)
         header = frame_row(screen, 1)
         rendered = frame_row(screen, 2)
         date = views.session_date(entry)
         self.assertEqual(
-            header.index("updated") + len("updated"),
-            rendered.index(date) + len(date),
+            header.index("updated"),
+            rendered.index(date),
         )
         self.assertEqual(header.index("session"), rendered.index("Aligned session"))
 

@@ -19,7 +19,7 @@ import asdu_sources as sources_api
 import asdu_tui as ui
 import asdu_views as view
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 
 def default_root(variable: str, directory: str, leaf: str) -> Path:

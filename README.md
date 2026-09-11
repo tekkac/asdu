@@ -50,15 +50,15 @@ of sessions in the current folder. Press `t` to show session trees; they open
 folded.
 
 ```text
- asdu  ~/Code/demo                         143.9 MiB  12 sessions  size↓
-›   74.2 MiB  ████████████                         6  /api
-    38.1 MiB  ██████▏░░░░░                         3  /docs
+ asdu  ~/Code/demo                                                         143.9 MiB  12 sessions  size↓
+    74.2 MiB  ████████████      5  /api
+    38.1 MiB  ██████▏░░░░░      3  /docs
 
-    23.5 MiB  ███▊░░░░░░░░  codex   main        now  ▸ Fix flaky tests (+2)
-     8.1 MiB  █▎░░░░░░░░░░  claude  main     12m ago  Review the release notes
+›   23.5 MiB  ████████████  codex   main    now       ▸ Fix flaky tests (+2)
+     8.1 MiB  ████▏░░░░░░░  claude  main    12m ago   Review the release notes
 
  codex 019bcb82-bef5-7503 | 2026-09-09 11:52 | ~/.codex/sessions/…jsonl
- Enter open  Backspace back  a action  t tree  / find  g group  f source  F type  s sort  ? help  q quit
+ Enter open  Backspace back  a action  t tree  / find  g group  f source  F type  s sort   ? help  q quit
 ```
 
 - Arrow keys select rows. In trees, `↑↓` select siblings and `←→` move between
@@ -83,7 +83,7 @@ Press `Enter` on a session to see its folder, size, ID, activity, recent request
 last reply, and resume command.
 
 ```text
- Center the login form
+Center the login form
 
 18.2 MiB  claude main  2h ago
 Folder: /demo/web-app
