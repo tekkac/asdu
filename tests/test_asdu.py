@@ -498,10 +498,31 @@ class RenderingTests(unittest.TestCase):
         rendered = frame_row(screen, 2)
         date = views.session_date(entry)
         self.assertEqual(
-            header.index("updated"),
-            rendered.index(date),
+            header.index("updated") + len("updated"),
+            rendered.index(date) + len(date),
         )
         self.assertEqual(header.index("session"), rendered.index("Aligned session"))
+
+    def test_session_dates_are_right_aligned(self):
+        now = 2_000_000.0
+        screen = Screen([], width=120)
+        with patch.object(views.time, "time", return_value=now):
+            for row, name, title, days in (
+                (2, "recent", "Recent", 1),
+                (3, "older", "Older", 15),
+            ):
+                views.draw_session_line(
+                    screen,
+                    row,
+                    session(name, title=title, modified=now - days * 86400),
+                    False,
+                    largest=10,
+                )
+        screen.refresh()
+        recent = frame_row(screen, 2)
+        older = frame_row(screen, 3)
+        self.assertEqual(recent.index("ago") + 3, older.index("ago") + 3)
+        self.assertEqual(recent.index("Recent"), older.index("Older"))
 
     def test_only_source_token_is_colored(self):
         screen = Screen([], width=110)
