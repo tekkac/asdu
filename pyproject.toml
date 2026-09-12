@@ -4,12 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "asdu"
-version = "0.4.1"
-description = "A local terminal browser for coding-agent session storage"
+version = "0.4.2"
+description = "A terminal disk-usage browser for Codex, Claude, and OMP sessions"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 dependencies = ["send2trash>=1.8.3"]
+
+[project.urls]
+Homepage = "https://github.com/tekkac/asdu"
+Repository = "https://github.com/tekkac/asdu"
+Issues = "https://github.com/tekkac/asdu/issues"
 
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.9"]

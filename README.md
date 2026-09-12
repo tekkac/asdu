@@ -21,14 +21,14 @@ up or down the directory tree. Everything stays local.
 Install with [uv](https://docs.astral.sh/uv/):
 
 ```sh
-uv tool install 'git+https://github.com/tekkac/asdu.git'
+uv tool install asdu
 asdu
 ```
 
 Update an existing installation:
 
 ```sh
-uv tool install --force 'git+https://github.com/tekkac/asdu.git'
+uv tool upgrade asdu
 ```
 
 ## Use
