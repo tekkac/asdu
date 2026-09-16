@@ -1,1 +1,1 @@
-recursive-include tests *.py *.jsonl
+recursive-include tests *.py *.json *.jsonl

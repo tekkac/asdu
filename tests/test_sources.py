@@ -15,6 +15,7 @@ import asdu_views as views
 from asdu_sources import (
     claude,
     codex,
+    kimi,
     omp,
     perform_session_action,
     scan,
@@ -50,7 +51,9 @@ class SourceTests(unittest.TestCase):
     def test_registry_scans_all_existing_roots(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            roots = {name: root / name for name in ("codex", "claude", "omp")}
+            roots = {
+                name: root / name for name in ("codex", "claude", "kimi", "omp")
+            }
             for path in roots.values():
                 path.mkdir()
             with (
@@ -63,14 +66,128 @@ class SourceTests(unittest.TestCase):
                 patch.object(
                     omp, "discover", return_value=[session("o", source="omp")]
                 ),
+                patch.object(
+                    kimi, "discover", return_value=[session("k", source="kimi")]
+                ),
             ):
                 adapters = source_adapters(
-                    roots["codex"], roots["claude"], roots["omp"]
+                    roots["codex"],
+                    roots["claude"],
+                    roots["omp"],
+                    roots["kimi"],
                 )
                 entries = scan(tuple(adapters), adapters, ui.ScanProgress(False))
             self.assertEqual(
-                {entry.source for entry in entries}, {"codex", "claude", "omp"}
+                {entry.source for entry in entries},
+                {"codex", "claude", "kimi", "omp"},
             )
+
+    def test_kimi_bundle_maps_main_child_brief_and_exact_storage(self):
+        root = FIXTURES / "kimi-code" / "sessions"
+        entries = kimi.discover(root, ui.ScanProgress(False))
+        self.assertEqual(len(entries), 2)
+        main, child = entries
+
+        self.assertEqual(
+            (
+                main.source,
+                main.origin,
+                main.cwd,
+                main.session_id,
+                main.title,
+                main.forked_from,
+            ),
+            (
+                "kimi",
+                "primary",
+                "/workspace/demo",
+                "session_kimi-test-001",
+                "Kimi fixture",
+                "session_kimi-parent",
+            ),
+        )
+        self.assertEqual(
+            (child.origin, child.session_id, child.parent_id, child.title),
+            (
+                "subagent",
+                "session_kimi-test-001:agent-0",
+                "session_kimi-test-001",
+                "Audit the fictional Kimi fixture",
+            ),
+        )
+        self.assertEqual(
+            browser.parent_links(entries)[browser.row_id(child)],
+            browser.row_id(main),
+        )
+
+        bundle = root / "wd-demo_abc" / "session_kimi-test-001"
+        exact_size = sum(
+            path.lstat().st_size
+            for path in bundle.rglob("*")
+            if path.is_symlink() or path.is_file()
+        )
+        child_size = sum(
+            path.lstat().st_size
+            for path in (bundle / "agents" / "agent-0").rglob("*")
+            if path.is_symlink() or path.is_file()
+        )
+        self.assertEqual(sum(entry.size for entry in entries), exact_size)
+        self.assertEqual(child.size, child_size)
+
+        main_digest = views.digest(main)
+        self.assertIn("fixture inspected", main_digest)
+        self.assertIn("1 turns across 6 events; 1 compactions", main_digest)
+        self.assertIn("Provider: moonshot", main_digest)
+        self.assertIn("Model: kimi-k2", main_digest)
+        child_digest = views.digest(child)
+        self.assertIn("Initial objective", child_digest)
+        self.assertIn("Audit the fictional Kimi fixture", child_digest)
+        self.assertIn("child fixture inspected", child_digest)
+
+    def test_kimi_rejects_unsupported_state_versions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bundle = root / "wd" / "session"
+            bundle.mkdir(parents=True)
+            (bundle / "state.json").write_text(
+                json.dumps({"id": "session", "version": 99})
+            )
+            progress = ui.ScanProgress(False)
+            self.assertEqual(kimi.discover(root, progress), [])
+            self.assertEqual(progress.invalid, {bundle / "state.json"})
+
+    def test_kimi_uses_real_prompt_when_native_title_is_missing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bundle = root / "wd" / "session"
+            wire = bundle / "agents" / "main" / "wire.jsonl"
+            wire.parent.mkdir(parents=True)
+            (bundle / "state.json").write_text(
+                json.dumps(
+                    {
+                        "id": "session-minimal",
+                        "version": 2,
+                        "cwd": "/workspace/minimal",
+                    }
+                )
+            )
+            wire.write_text(
+                json.dumps(
+                    {
+                        "type": "context.append_message",
+                        "message": {
+                            "role": "user",
+                            "origin": {"kind": "user"},
+                            "content": [
+                                {"type": "text", "text": "Fallback request"}
+                            ],
+                        },
+                    }
+                )
+                + "\n"
+            )
+            entry = kimi.discover(root, ui.ScanProgress(False))[0]
+        self.assertEqual(entry.title, "untitled — Fallback request")
 
     def test_codex_native_title_and_archived_state(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -223,10 +340,26 @@ class SourceTests(unittest.TestCase):
             session_controls(session("omp", source="omp")).commands[0].argv,
             ("omp", "--resume", "omp"),
         )
+        self.assertEqual(
+            session_controls(session("kimi", source="kimi")).commands[0].argv,
+            ("kimi", "--session", "kimi"),
+        )
+        self.assertFalse(
+            session_controls(
+                session("child", source="kimi", origin="subagent")
+            ).commands
+        )
+        self.assertFalse(
+            session_controls(session("archived", source="kimi", archived=True)).commands
+        )
 
     def test_omp_is_read_only(self):
         with self.assertRaisesRegex(OSError, "read-only"):
             perform_session_action(session("omp", source="omp"), "delete")
+
+    def test_kimi_is_read_only(self):
+        with self.assertRaisesRegex(OSError, "read-only"):
+            perform_session_action(session("kimi", source="kimi"), "delete")
 
 
 if __name__ == "__main__":

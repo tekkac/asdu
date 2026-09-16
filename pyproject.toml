@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "asdu"
-version = "0.4.3"
-description = "A terminal disk-usage browser for Codex, Claude, and OMP sessions"
+version = "0.5.0"
+description = "A terminal disk-usage browser for Codex, Claude, Kimi, and OMP sessions"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"

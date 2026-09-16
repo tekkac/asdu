@@ -19,7 +19,7 @@ import asdu_sources as sources_api
 import asdu_tui as ui
 import asdu_views as view
 
-__version__ = "0.4.3"
+__version__ = "0.5.0"
 
 
 def default_root(variable: str, directory: str, leaf: str) -> Path:
@@ -68,8 +68,14 @@ def parser() -> argparse.ArgumentParser:
         help="OMP session storage directory (read-only)",
     )
     result.add_argument(
+        "--kimi-root",
+        type=Path,
+        default=default_root("KIMI_CODE_HOME", ".kimi-code", "sessions"),
+        help="Kimi Code session storage directory (read-only)",
+    )
+    result.add_argument(
         "--source",
-        choices=("codex", "claude", "omp"),
+        choices=("codex", "claude", "kimi", "omp"),
         action="append",
         help="Repeat to select sources; default is all available",
     )
@@ -122,7 +128,7 @@ def run_main() -> int:
         )
 
     adapters = sources_api.source_adapters(
-        args.codex_root, args.claude_root, args.omp_root
+        args.codex_root, args.claude_root, args.omp_root, args.kimi_root
     )
     sources = tuple(dict.fromkeys(args.source or adapters))
     source_roots = {
@@ -137,7 +143,7 @@ def run_main() -> int:
                 argument_parser.error(f"{source} session root does not exist: {root}")
     elif not source_roots:
         argument_parser.error(
-            "no supported session roots found; pass --codex-root, --claude-root, or --omp-root"
+            "no supported session roots found; pass a --*-root option"
         )
     start = (args.project or Path.cwd()).resolve()
 
@@ -169,7 +175,10 @@ def run_main() -> int:
     elif args.command == "digest":
         if not args.session:
             argument_parser.error("digest requires --session SESSION_ID")
-        matches = [
+        exact = [
+            session for session in sessions if session.session_id == args.session
+        ]
+        matches = exact or [
             session
             for session in sessions
             if session.session_id.startswith(args.session)

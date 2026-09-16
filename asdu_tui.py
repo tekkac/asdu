@@ -1373,6 +1373,7 @@ def tui(
                 7: 33 if curses.COLORS >= 256 else curses.COLOR_CYAN,
                 8: 208 if curses.COLORS >= 256 else curses.COLOR_YELLOW,
                 10: 37 if curses.COLORS >= 256 else curses.COLOR_GREEN,
+                11: 141 if curses.COLORS >= 256 else curses.COLOR_MAGENTA,
             }
             for pair, color in colors.items():
                 curses.init_pair(pair, color, -1)

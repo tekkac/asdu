@@ -43,6 +43,8 @@ class BriefData:
     latest_model: str = ""
     user_messages: int = 0
     assistant_messages: int = 0
+    turns: int = 0
+    compactions: int = 0
 
 
 @dataclass(frozen=True)
@@ -313,6 +315,8 @@ def read_jsonl_brief(
     poll=None,
     preview=False,
     enrich=None,
+    turn_events: tuple[str, ...] = ("turn_context",),
+    compaction_events: tuple[str, ...] = ("compacted", "context_compacted"),
 ) -> BriefData:
     """Shared streaming and preview mechanics; formats belong to source readers."""
     data = BriefData(
@@ -349,4 +353,6 @@ def read_jsonl_brief(
                     found_assistant = True
                     data.latest_reply = text
             data.assistant_messages += found_assistant
+    data.turns = sum(data.event_counts[event] for event in turn_events)
+    data.compactions = sum(data.event_counts[event] for event in compaction_events)
     return data

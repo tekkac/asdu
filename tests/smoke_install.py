@@ -13,7 +13,7 @@ import asdu_browser
 import asdu_sessions
 import asdu_tui as ui
 import asdu_views as views
-from asdu_sources import claude, codex, omp
+from asdu_sources import claude, codex, kimi, omp
 
 
 class InstalledSmoke(unittest.TestCase):
@@ -44,8 +44,13 @@ class InstalledSmoke(unittest.TestCase):
                 shutil.copy(fixtures / filename, target)
                 roots[reader] = target
                 entries.extend(reader.discover(target, ui.ScanProgress(False)))
+            kimi_root = root / "kimi"
+            shutil.copytree(fixtures / "kimi-code" / "sessions", kimi_root)
+            roots[kimi] = kimi_root
+            entries.extend(kimi.discover(kimi_root, ui.ScanProgress(False)))
             self.assertEqual(
-                {entry.source for entry in entries}, {"codex", "claude", "omp"}
+                {entry.source for entry in entries},
+                {"codex", "claude", "kimi", "omp"},
             )
             for entry in entries:
                 self.assertIn("fixture inspected", views.digest(entry))
@@ -57,6 +62,8 @@ class InstalledSmoke(unittest.TestCase):
                 str(roots[claude]),
                 "--omp-root",
                 str(roots[omp]),
+                "--kimi-root",
+                str(roots[kimi]),
                 "--no-progress",
             ]
             self.assertTrue(

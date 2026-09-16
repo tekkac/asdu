@@ -719,6 +719,50 @@ class ActionTests(unittest.TestCase):
 
 
 class CliAndReaderTests(unittest.TestCase):
+    def test_digest_prefers_exact_id_over_child_prefixes(self):
+        parent = transcripts.Session(
+            FIXTURES / "rollout-codex.jsonl",
+            1,
+            0,
+            "codex",
+            "primary",
+            "/workspace",
+            "root",
+            None,
+            "Parent",
+        )
+        child = transcripts.Session(
+            FIXTURES / "rollout-codex.jsonl",
+            1,
+            0,
+            "codex",
+            "subagent",
+            "/workspace",
+            "root:child",
+            "root",
+            "Child",
+        )
+        with (
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "asdu",
+                    "digest",
+                    "--session",
+                    "root",
+                    "--codex-root",
+                    str(FIXTURES),
+                    "--no-progress",
+                ],
+            ),
+            patch.object(source_api, "scan", return_value=[parent, child]),
+            patch.object(views, "session_brief", return_value="parent") as brief,
+            patch("builtins.print"),
+        ):
+            self.assertEqual(asdu.run_main(), 0)
+        self.assertIs(brief.call_args.args[0], parent)
+
     def test_cli_rejects_meaningless_all_view_options(self):
         common = [
             "--codex-root",
@@ -750,7 +794,9 @@ class CliAndReaderTests(unittest.TestCase):
             patch.object(ui, "tui") as tui,
         ):
             self.assertEqual(asdu.run_main(), 0)
-        self.assertEqual(scan.call_args.args[0], ("codex", "claude", "omp"))
+        self.assertEqual(
+            scan.call_args.args[0], ("codex", "claude", "omp", "kimi")
+        )
         self.assertEqual(tui.call_args.args[1], "cwd")
         self.assertEqual(tui.call_args.args[3], Path.cwd().resolve())
 

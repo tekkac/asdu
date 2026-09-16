@@ -238,9 +238,9 @@ def read_digest(
         return f"│ {compact_text(text, 320) if text else 'none found'}"
 
     events = sum(event_counts.values())
-    turns = event_counts["turn_context"]
+    turns = data.turns
     messages = data.user_messages + data.assistant_messages
-    compactions = event_counts["compacted"] + event_counts["context_compacted"]
+    compactions = data.compactions
     activity = f"{turns:,} turns" if turns else f"{messages:,} messages"
     initial_label = "Initial objective" if data.first_objective else "First request"
     if data.forked_from:
@@ -360,7 +360,7 @@ def draw_line(
 
 
 def source_color(source: str) -> int:
-    return {"codex": 7, "claude": 8, "omp": 10}.get(source, 0)
+    return {"codex": 7, "claude": 8, "omp": 10, "kimi": 11}.get(source, 0)
 
 
 def session_type_label(session: Session) -> str:

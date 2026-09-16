@@ -52,6 +52,8 @@ class TerminalTests(unittest.TestCase):
                 self.directory.name,
                 "--omp-root",
                 self.directory.name,
+                "--kimi-root",
+                self.directory.name,
             ],
             stdin=self.slave,
             stdout=self.slave,

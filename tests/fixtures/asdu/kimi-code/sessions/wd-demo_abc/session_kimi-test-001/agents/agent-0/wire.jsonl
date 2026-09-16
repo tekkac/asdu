@@ -1,0 +1,5 @@
+{"type":"metadata","timestamp":1767225601000}
+{"type":"context.append_message","message":{"role":"user","origin":{"kind":"system_trigger"},"content":[{"type":"text","text":"Audit the fictional Kimi fixture"}]}}
+{"type":"llm.request","provider":"moonshot","modelAlias":"kimi-k2"}
+{"type":"context.append_loop_event","event":{"type":"content.part","part":{"type":"text","text":"child fixture inspected"}}}
+{"type":"turn.ended"}

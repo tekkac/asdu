@@ -11,7 +11,7 @@
             agent session disk usage
 ```
 
-`asdu` shows where Codex, Claude, and OMP sessions use disk space.
+`asdu` shows where Codex, Claude, Kimi, and OMP sessions use disk space.
 
 It works like a file browser. Start in a folder, inspect its sessions, and move
 up or down the directory tree. Everything stays local.
@@ -110,6 +110,9 @@ Browsing never changes a session. Press `a` to review an action before it runs.
 Codex archive and restore use Codex itself. Codex delete is permanent. Claude
 sessions can move to the system Trash. Tree actions include folded descendants.
 Active Claude sessions are refused.
+
+Kimi and OMP sessions are read-only. Kimi's native agents appear as tree
+children.
 
 Successful actions append a content-free record to
 `$XDG_STATE_HOME/asdu/actions.jsonl`, normally

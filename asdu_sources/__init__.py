@@ -12,9 +12,9 @@ from asdu_sessions import (
     SessionControls,
 )
 
-from . import claude, codex, omp
+from . import claude, codex, kimi, omp
 
-READERS = {"codex": codex, "claude": claude, "omp": omp}
+READERS = {"codex": codex, "claude": claude, "kimi": kimi, "omp": omp}
 
 
 def available_actions(session: Session) -> frozenset[str]:
@@ -29,11 +29,16 @@ class SourceAdapter:
 
 
 def source_adapters(
-    codex_root: Path, claude_root: Path, omp_root: Path | None = None
+    codex_root: Path,
+    claude_root: Path,
+    omp_root: Path | None = None,
+    kimi_root: Path | None = None,
 ) -> dict[str, SourceAdapter]:
     roots = {"codex": codex_root, "claude": claude_root}
     if omp_root is not None:
         roots["omp"] = omp_root
+    if kimi_root is not None:
+        roots["kimi"] = kimi_root
     return {
         name: SourceAdapter(root, READERS[name].discover)
         for name, root in roots.items()

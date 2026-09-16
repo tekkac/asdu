@@ -21,6 +21,15 @@ _Avoid_: Message parent, folder nesting
 Whether the source considers a session active or archived. This is separate from
 session type; archived Codex sessions are shown as `arch` in the compact list.
 
+**Session bundle**:
+A source-owned directory containing one main session, optional child sessions,
+and shared artifacts.
+
+**Storage ownership**:
+The physical bytes attributed to one displayed session. A byte belongs to
+exactly one session even when a source groups a main session, child sessions,
+and shared artifacts inside one session bundle.
+
 **Session title**:
 A display name taken from the source when available, otherwise derived from the
 session's goal or conversation. A native user-assigned name takes precedence.

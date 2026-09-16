@@ -1,0 +1,6 @@
+{"type":"metadata","timestamp":1767225600000}
+{"type":"context.append_message","message":{"role":"user","origin":{"kind":"user"},"content":[{"type":"text","text":"inspect the synthetic Kimi fixture"}]}}
+{"type":"llm.request","provider":"moonshot","model":"kimi-k2"}
+{"type":"context.append_loop_event","event":{"type":"content.part","part":{"type":"text","text":"fixture inspected"}}}
+{"type":"turn.ended"}
+{"type":"context.apply_compaction"}
