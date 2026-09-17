@@ -17,6 +17,7 @@ from asdu_sources import (
     codex,
     kimi,
     omp,
+    opencode,
     perform_session_action,
     scan,
     session_controls,
@@ -52,7 +53,8 @@ class SourceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             roots = {
-                name: root / name for name in ("codex", "claude", "kimi", "omp")
+                name: root / name
+                for name in ("codex", "claude", "kimi", "omp", "opencode")
             }
             for path in roots.values():
                 path.mkdir()
@@ -69,17 +71,23 @@ class SourceTests(unittest.TestCase):
                 patch.object(
                     kimi, "discover", return_value=[session("k", source="kimi")]
                 ),
+                patch.object(
+                    opencode,
+                    "discover",
+                    return_value=[session("p", source="opencode")],
+                ),
             ):
                 adapters = source_adapters(
                     roots["codex"],
                     roots["claude"],
                     roots["omp"],
                     roots["kimi"],
+                    roots["opencode"],
                 )
                 entries = scan(tuple(adapters), adapters, ui.ScanProgress(False))
             self.assertEqual(
                 {entry.source for entry in entries},
-                {"codex", "claude", "kimi", "omp"},
+                {"codex", "claude", "kimi", "omp", "opencode"},
             )
 
     def test_kimi_bundle_maps_main_child_brief_and_exact_storage(self):
@@ -340,25 +348,35 @@ class SourceTests(unittest.TestCase):
             session_controls(session("omp", source="omp")).commands[0].argv,
             ("omp", "--resume", "omp"),
         )
+        kimi_commands = session_controls(session("kimi", source="kimi")).commands
         self.assertEqual(
-            session_controls(session("kimi", source="kimi")).commands[0].argv,
-            ("kimi", "--session", "kimi"),
+            [(command.label, command.argv) for command in kimi_commands],
+            [
+                ("Resume", ("kimi", "--session", "kimi")),
+                (
+                    "Export",
+                    ("kimi", "export", "kimi", "--no-include-global-log"),
+                ),
+            ],
         )
         self.assertFalse(
             session_controls(
                 session("child", source="kimi", origin="subagent")
             ).commands
         )
-        self.assertFalse(
-            session_controls(session("archived", source="kimi", archived=True)).commands
+        self.assertEqual(
+            session_controls(
+                session("archived", source="kimi", archived=True)
+            ).commands[0].label,
+            "Export",
         )
 
-    def test_omp_is_read_only(self):
-        with self.assertRaisesRegex(OSError, "read-only"):
+    def test_omp_has_no_delete_action(self):
+        with self.assertRaisesRegex(OSError, "does not support delete"):
             perform_session_action(session("omp", source="omp"), "delete")
 
-    def test_kimi_is_read_only(self):
-        with self.assertRaisesRegex(OSError, "read-only"):
+    def test_kimi_has_no_delete_action(self):
+        with self.assertRaisesRegex(OSError, "does not support delete"):
             perform_session_action(session("kimi", source="kimi"), "delete")
 
 

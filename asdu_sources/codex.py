@@ -16,6 +16,7 @@ from asdu_sessions import (
     iter_jsonl,
     message_texts,
     read_jsonl_brief,
+    require_unchanged,
     scan_paths,
     session_label,
     substantive_user_text,
@@ -44,6 +45,16 @@ def session_controls(session: Session) -> SessionControls:
         else (SessionCommand("Resume", ("codex", "resume", session.session_id)),)
     )
     return SessionControls(commands)
+
+
+def prepare_actions(sessions: list[Session], action: str) -> None:
+    """Validate a complete Codex action scope before changing any session."""
+    for session in sessions:
+        if action not in available_actions(session):
+            raise OSError(f"Codex cannot {action} this session")
+        if not valid_session_id(session.session_id):
+            raise OSError("invalid Codex session ID; rescan before acting")
+        require_unchanged(session)
 
 
 def perform_action(session: Session, action: str) -> ActionResult:
@@ -95,7 +106,17 @@ def perform_action(session: Session, action: str) -> ActionResult:
         raise OSError(
             f"Codex {action} reported success but the original session still exists"
         )
-    replacement = replace(session, path=path, archived=action == "archive")
+    try:
+        current = path.stat()
+    except OSError as error:
+        raise OSError(f"Codex {action} destination is not readable") from error
+    replacement = replace(
+        session,
+        path=path,
+        size=current.st_size,
+        modified=current.st_mtime,
+        archived=action == "archive",
+    )
     return ActionResult(replacement=replacement)
 
 

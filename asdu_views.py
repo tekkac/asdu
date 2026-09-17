@@ -19,13 +19,13 @@ from asdu_browser import (
     subtree_stats,
 )
 from asdu_sessions import Session, SessionControls, session_label
-from asdu_sources import available_actions, read_brief, session_controls
+from asdu_sources import action_scope, available_actions, read_brief, session_controls
 
 ASCII_UI = False
 CONTENT_RIGHT_MARGIN = 3
 SELECTED_COLOR = 9
 SIZE_COLUMN_WIDTH = 10
-SOURCE_COLUMN_WIDTH = 6
+SOURCE_COLUMN_WIDTH = 8
 TYPE_COLUMN_WIDTH = 6
 DATE_COLUMN_WIDTH = 8
 
@@ -36,6 +36,19 @@ def human_size(size: int) -> str:
             return f"{size:.1f} {unit}" if unit != "B" else f"{size} B"
         size /= 1024
     raise AssertionError("unreachable")
+
+
+def session_size(size: int, logical: bool = False) -> str:
+    """Mark shared-store measurements without pretending they are disk bytes."""
+    return ("~" if logical else "") + human_size(size)
+
+
+def aggregate_size(sessions: Iterable[Session]) -> str:
+    sessions = list(sessions)
+    return session_size(
+        sum(session.size for session in sessions),
+        any(session.size_is_logical for session in sessions),
+    )
 
 
 def session_date(session: Session) -> str:
@@ -143,11 +156,22 @@ def splash_lines(width: int) -> list[str]:
     ]
 
 
-def indexing_panel(source: str, current: int, done: int, total: int) -> list[str]:
+def indexing_panel(
+    source: str,
+    current: int,
+    done: int,
+    total: int,
+    unit: str = "sessions",
+) -> list[str]:
     """Fixed-width progress panel whose three content rows update in place."""
     percent = min(100, max(0, done * 100 // total)) if total else 0
     status = f"Indexing {source}" if source else "Discovering sessions"
     count = f"{current:,} sessions"
+    detail = (
+        pad_display(count, max(0, 44 - len(human_size(done)))) + human_size(done)
+        if unit == "sessions"
+        else f"{current:,} / {total:,} {unit}"
+    )
 
     def row(text: str) -> str:
         return terminal_art("│ " + pad_display(compact_text(text, 44), 44) + " │")
@@ -156,19 +180,24 @@ def indexing_panel(source: str, current: int, done: int, total: int) -> list[str
         terminal_art("╭" + "─" * 46 + "╮"),
         row(status),
         row(f"{size_bar(percent, 100, 36 if ascii_ui() else 38)}  {percent:3d}%"),
-        row(pad_display(count, max(0, 44 - len(human_size(done)))) + human_size(done)),
+        row(detail),
         terminal_art("╰" + "─" * 46 + "╯"),
     ]
 
 
 def scan_status(
-    source: str, current: int, count: int, done: int, total: int, width: int
+    source: str,
+    current: int,
+    count: int,
+    done: int,
+    total: int,
+    width: int,
+    unit: str = "sessions",
 ) -> str:
     percent = min(100, max(0, done * 100 // total)) if total else 0
-    suffix = (
-        f" {percent:3d}%  {current:,}/{count:,} sessions  "
-        f"{human_size(done)} / {human_size(total)}"
-    )
+    suffix = f" {percent:3d}%  {current:,}/{count:,} {unit}"
+    if unit == "sessions":
+        suffix += f"  {human_size(done)} / {human_size(total)}"
     prefix = f"asdu: indexing {source} "
     bar_width = max(8, min(24, width - display_width(prefix + suffix) - 2))
     return compact_text(prefix + progress_bar(percent, bar_width) + suffix, width)
@@ -257,6 +286,8 @@ def read_digest(
         metadata.append(f"Forked from: {data.forked_from}")
     if session.parent_id and session.parent_id != data.forked_from:
         metadata.append(f"Parent session: {session.parent_id}")
+    if session.archived:
+        metadata.append("Storage: archived")
     if controls.runtime_id:
         metadata.append(
             f"{controls.runtime_kind.title() if controls.runtime_kind else 'Agent'}: "
@@ -268,7 +299,7 @@ def read_digest(
     sample = " (preview)" if preview else ""
     state = " archived" if session.archived else ""
     lines = [
-        f"{human_size(session.size)}  {session.source} {origin_label(session.origin)}{state}  {session_date(session)}",
+        f"{session_size(session.size, session.size_is_logical)}  {session.source} {origin_label(session.origin)}{state}  {session_date(session)}",
         f"Folder: {session.cwd}",
         "Counting activity…"
         if preview
@@ -296,16 +327,12 @@ def print_summary(sessions: list[Session], mode: str, sort_by: str) -> None:
     width = max((len(name) for name, _ in groups), default=10)
     label = {"cwd": "folder", "origin": "session type"}.get(mode, mode)
     print(
-        f"{len(sessions):,} sessions  "
-        f"{human_size(sum(s.size for s in sessions))}  grouped by {label}\n"
+        f"{len(sessions):,} sessions  {aggregate_size(sessions)}  grouped by {label}\n"
     )
     print(f"{'group':<{width}}  sessions       size")
     print(f"{'-' * width}  --------  ---------")
     for name, entries in groups:
-        print(
-            f"{name:<{width}}  {len(entries):>8,}  "
-            f"{human_size(sum(s.size for s in entries)):>10}"
-        )
+        print(f"{name:<{width}}  {len(entries):>8,}  {aggregate_size(entries):>10}")
 
 
 def color_attr(window, color: int) -> int:
@@ -360,7 +387,17 @@ def draw_line(
 
 
 def source_color(source: str) -> int:
-    return {"codex": 7, "claude": 8, "omp": 10, "kimi": 11}.get(source, 0)
+    return {
+        "codex": 7,
+        "claude": 8,
+        "omp": 10,
+        "kimi": 11,
+        "opencode": 4,
+    }.get(source, 0)
+
+
+def source_name(source: str) -> str:
+    return {"omp": "OMP", "opencode": "OpenCode"}.get(source, source.title())
 
 
 def session_type_label(session: Session) -> str:
@@ -397,7 +434,9 @@ def draw_session_line(
     size, descendants = stats if stats is not None else (session.size, 0)
     bar_width = row_bar_width(width)
     bar = f"{size_bar(size, largest, bar_width)}  " if bar_width else ""
-    prefix = f"  {human_size(size):>{SIZE_COLUMN_WIDTH}}  {bar}"
+    prefix = (
+        f"  {session_size(size, session.size_is_logical):>{SIZE_COLUMN_WIDTH}}  {bar}"
+    )
     source = f"{session.source:<{SOURCE_COLUMN_WIDTH}}  "
     kind = f"{session_type_label(session):<{TYPE_COLUMN_WIDTH}}  "
     date = f"{session_date(session):>{DATE_COLUMN_WIDTH}}  "
@@ -516,37 +555,54 @@ def confirm_session_action(
     supported = available_actions(session)
     actions = [
         action
-        for action in ("archive", "unarchive", "trash", "delete")
+        for action in ("export", "archive", "unarchive", "trash", "delete")
         if action in supported
     ]
     options = [
         choice
         for action in actions
-        for choice in ([action, f"{action} tree"] if descendants else [action])
+        for choice in (
+            [action, f"{action} tree"]
+            if descendants and action_scope(session, action) == "selectable-tree"
+            else [f"{action} tree"]
+            if descendants and action_scope(session, action) == "native-tree"
+            else [action]
+        )
     ]
     total = sum(entry.size for entry in subtree)
     body = [
         session_label(session),
         (
-            f"{session.source} | {human_size(session.size)} | "
+            f"{session.source} | "
+            f"{session_size(session.size, session.size_is_logical)} | "
             f"{short_path(session.cwd)} | {session_date(session)} | "
             f"{session.session_id[:18]}"
         ),
     ]
     labels = {}
     verbs = {
+        "export": "Export",
         "archive": "Archive",
         "unarchive": "Unarchive",
         "trash": "Trash",
         "delete": "Delete",
     }
-    keys = {"archive": "a", "unarchive": "u", "trash": "t", "delete": "d"}
+    keys = {
+        "export": "e",
+        "archive": "a",
+        "unarchive": "u",
+        "trash": "t",
+        "delete": "d",
+    }
     for option in options:
         action = option.removesuffix(" tree")
         tree_action = option.endswith(" tree")
         affected = total if tree_action else session.size
         count = len(subtree) if tree_action else 1
-        if action == "archive":
+        if action == "export":
+            destination = Path.cwd() / f"session-{session.session_id}.zip"
+            detail = f"write {short_path(str(destination))} | keeps session"
+        elif action == "archive":
             destination = (
                 short_path(str(Path(session.source_home) / "archived_sessions"))
                 if session.source_home
@@ -562,35 +618,45 @@ def confirm_session_action(
             detail = f"restore to {destination} | frees 0 B"
         elif action == "trash":
             detail = f"system Trash | frees {human_size(affected)} | recoverable"
+        elif session.size_is_logical:
+            detail = (
+                f"native {source_name(session.source)} delete | permanent | "
+                f"removes {session_size(affected, True)} logical"
+            )
         else:
-            detail = f"run codex delete | permanent | frees {human_size(affected)}"
+            detail = (
+                f"native {source_name(session.source)} delete | permanent | "
+                f"frees {human_size(affected)}"
+            )
         suffix = f" | {count} sessions" if tree_action else ""
-        key = keys[action].upper() if tree_action else keys[action]
+        key = (
+            keys[action]
+            if action_scope(session, action) == "native-tree"
+            else keys[action].upper()
+            if tree_action
+            else keys[action]
+        )
         labels[option] = (
             f"{key}  {verbs[action]}{' tree' if tree_action else '':<9}  "
             f"{detail}{suffix}"
         )
     labels["cancel"] = "   Cancel"
+    shortcuts = {}
+    for action in actions:
+        choices = [
+            option for option in options if option.removesuffix(" tree") == action
+        ]
+        single = next((option for option in choices if not option.endswith(" tree")), None)
+        tree = next((option for option in choices if option.endswith(" tree")), None)
+        shortcuts[ord(keys[action])] = single or tree
+        shortcuts[ord(keys[action].upper())] = tree or single
     return action_dialog(
         window,
         "Session action",
         body,
         [*options, "cancel"],
-        actions[0] if actions else "cancel",
-        {
-            ord(key): choice + (" tree" if key.isupper() and descendants else "")
-            for key, choice in (
-                ("a", "archive"),
-                ("u", "unarchive"),
-                ("t", "trash"),
-                ("d", "delete"),
-                ("A", "archive"),
-                ("U", "unarchive"),
-                ("T", "trash"),
-                ("D", "delete"),
-            )
-            if choice in actions
-        },
+        options[0] if options else "cancel",
+        shortcuts,
         labels,
     )
 
@@ -620,16 +686,20 @@ def confirm_permanent_delete(window: curses.window, count: int = 1) -> bool:
     return confirm_action(
         window,
         "Confirm delete",
-        "Permanently delete {target} through Codex?",
+        "Permanently delete {target} through its source?",
         count,
     )
 
 
 def brief_sizes(session: Session, entries: Iterable[Session]) -> str:
     total, descendants = subtree_stats(entries).get(row_id(session), (session.size, 0))
-    sizes = f"File: {human_size(session.size)}"
+    label = "Logical" if session.size_is_logical else "File"
+    sizes = f"{label}: {session_size(session.size, session.size_is_logical)}"
     if descendants:
-        sizes += f"\nTree: {human_size(total)} including {descendants} descendants in this view"
+        sizes += (
+            f"\nTree: {session_size(total, session.size_is_logical)} including "
+            f"{descendants} descendants in this view"
+        )
     return sizes
 
 

@@ -1,11 +1,15 @@
-"""Read-only Kimi Code session bundles (state format 2)."""
+"""Kimi Code session bundles and native commands (state format 2)."""
 
 from __future__ import annotations
 
 import json
+import re
+import subprocess
+import zipfile
 from pathlib import Path
 
 from asdu_sessions import (
+    ActionResult,
     BriefData,
     ScanReporter,
     Session,
@@ -18,17 +22,92 @@ from asdu_sessions import (
     untitled_title,
 )
 
+SESSION_ID = re.compile(r"^session_[A-Za-z0-9][A-Za-z0-9_-]*$")
 
-def available_actions(_session: Session) -> frozenset[str]:
-    return frozenset()
+
+def available_actions(session: Session) -> frozenset[str]:
+    return (
+        frozenset({"export"})
+        if session.origin == "primary" and SESSION_ID.fullmatch(session.session_id)
+        else frozenset()
+    )
+
+
+def action_scope(_session: Session, _action: str) -> str:
+    return "single"
+
+
+def export_destination(session: Session) -> Path:
+    return Path.cwd() / f"session-{session.session_id}.zip"
+
+
+def prepare_actions(sessions: list[Session], action: str) -> None:
+    if action != "export":
+        return
+    if len(sessions) != 1 or action not in available_actions(sessions[0]):
+        raise OSError("Kimi cannot export this session")
+    if export_destination(sessions[0]).exists():
+        raise OSError("Kimi export already exists in the current directory")
+
+
+def perform_action(session: Session, action: str) -> ActionResult:
+    if action != "export" or action not in available_actions(session):
+        raise OSError(f"Kimi cannot {action} this session")
+    destination = export_destination(session)
+    if destination.exists():
+        raise OSError("Kimi export already exists in the current directory")
+    command = [
+        "kimi",
+        "export",
+        session.session_id,
+        "--output",
+        str(destination),
+        "--no-include-global-log",
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise OSError("Kimi export timed out") from error
+    except OSError as error:
+        raise OSError(f"Could not run Kimi: {error}") from error
+    if result.returncode:
+        detail = (result.stderr or result.stdout).strip()
+        raise OSError(
+            "Kimi export failed"
+            + (f": {detail}" if detail else f" (exit {result.returncode})")
+        )
+    if not destination.is_file() or not zipfile.is_zipfile(destination):
+        raise OSError("Kimi reported success but did not create a valid ZIP")
+    return ActionResult(destination=destination, replacement=session)
 
 
 def session_controls(session: Session) -> SessionControls:
-    if session.origin != "primary" or session.archived:
+    if session.origin != "primary":
         return SessionControls()
-    return SessionControls(
-        (SessionCommand("Resume", ("kimi", "--session", session.session_id)),)
+    commands = []
+    if not session.archived:
+        commands.append(
+            SessionCommand("Resume", ("kimi", "--session", session.session_id))
+        )
+    commands.append(
+        SessionCommand(
+            "Export",
+            (
+                "kimi",
+                "export",
+                session.session_id,
+                "--no-include-global-log",
+            ),
+        )
     )
+    return SessionControls(tuple(commands))
 
 
 def path_size(path: Path) -> int:

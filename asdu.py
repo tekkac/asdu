@@ -27,6 +27,16 @@ def default_root(variable: str, directory: str, leaf: str) -> Path:
     return home.expanduser() / leaf
 
 
+def default_opencode_db() -> Path:
+    configured = os.environ.get("OPENCODE_DB")
+    if configured:
+        return Path(configured).expanduser()
+    data_home = Path(
+        os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share"
+    )
+    return data_home.expanduser() / "opencode" / "opencode.db"
+
+
 def main() -> int:
     try:
         return run_main()
@@ -71,11 +81,17 @@ def parser() -> argparse.ArgumentParser:
         "--kimi-root",
         type=Path,
         default=default_root("KIMI_CODE_HOME", ".kimi-code", "sessions"),
-        help="Kimi Code session storage directory (read-only)",
+        help="Kimi Code session storage directory",
+    )
+    result.add_argument(
+        "--opencode-db",
+        type=Path,
+        default=default_opencode_db(),
+        help="OpenCode session database",
     )
     result.add_argument(
         "--source",
-        choices=("codex", "claude", "kimi", "omp"),
+        choices=("codex", "claude", "kimi", "omp", "opencode"),
         action="append",
         help="Repeat to select sources; default is all available",
     )
@@ -128,7 +144,11 @@ def run_main() -> int:
         )
 
     adapters = sources_api.source_adapters(
-        args.codex_root, args.claude_root, args.omp_root, args.kimi_root
+        args.codex_root,
+        args.claude_root,
+        args.omp_root,
+        args.kimi_root,
+        args.opencode_db,
     )
     sources = tuple(dict.fromkeys(args.source or adapters))
     source_roots = {
@@ -148,7 +168,7 @@ def run_main() -> int:
     start = (args.project or Path.cwd()).resolve()
 
     def scan_current(
-        render: Callable[[str, int, int, int, int], None] | None = None,
+        render: Callable[[str, int, int, int, int, str], None] | None = None,
     ) -> list[store.Session]:
         progress = ui.ScanProgress(
             render is not None

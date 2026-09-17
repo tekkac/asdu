@@ -26,6 +26,7 @@ class ScanReporter(Protocol):
         total: int,
         done_bytes: int = 0,
         total_bytes: int = 0,
+        unit: str = "sessions",
     ) -> None: ...
 
 
@@ -62,6 +63,7 @@ class Session:
     forked_from: str = ""
     archived: bool = False
     source_home: str = ""
+    size_is_logical: bool = False
 
     @property
     def key(self) -> tuple[str, str]:
@@ -69,8 +71,8 @@ class Session:
 
     @property
     def storage_key(self) -> str:
-        """Opaque browser identity; distinct files may share a native session ID."""
-        return f"{self.source}:{self.path}"
+        """Opaque browser identity for file-backed and shared-store sessions."""
+        return f"{self.source}:{self.path}:{self.session_id}"
 
 
 @dataclass(frozen=True)
@@ -288,7 +290,12 @@ def action_log_path() -> Path:
 
 
 def record_action(
-    action: str, session: Session, destination: Path | None = None
+    action: str,
+    session: Session,
+    destination: Path | None = None,
+    *,
+    affected_count: int = 1,
+    affected_size: int | None = None,
 ) -> None:
     """Record only action metadata, never transcript content, outside the UI."""
     path = action_log_path()
@@ -301,8 +308,11 @@ def record_action(
         "path": str(session.path),
         "size": session.size,
     }
+    if affected_count > 1:
+        event["affected_count"] = affected_count
+        event["affected_size"] = affected_size
     if destination is not None:
-        event["archive"] = str(destination)
+        event["destination"] = str(destination)
     with path.open("a", encoding="utf-8") as output:
         output.write(json.dumps(event, separators=(",", ":")) + "\n")
 

@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 import unittest
+import zipfile
 from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
@@ -33,6 +34,7 @@ from asdu_sources import (
     available_actions,
     claude,
     codex,
+    kimi,
     prepare_session_actions,
 )
 
@@ -146,7 +148,7 @@ class BrowserTests(unittest.TestCase):
         self.assertIn("all sessions", frame_text(screen))
         self.assertIn("large", screen.selected())
 
-        self.assertIn("source  type", frame_text(screen))
+        self.assertIn("source    type", frame_text(screen))
 
         returned = browse_screen(
             [small, large],
@@ -448,6 +450,12 @@ class RenderingTests(unittest.TestCase):
         entry = codex.discover(FIXTURES, ui.ScanProgress(False))[0]
         self.assertIn("2 messages across 3 events", views.digest(entry))
 
+    def test_archived_session_brief_states_storage_explicitly(self):
+        entry = replace(
+            codex.discover(FIXTURES, ui.ScanProgress(False))[0], archived=True
+        )
+        self.assertIn("Storage: archived", views.digest(entry))
+
     def test_startup_banner_is_tty_only_and_preserves_scrollback(self):
         terminal = io.StringIO()
         with (
@@ -483,6 +491,19 @@ class RenderingTests(unittest.TestCase):
         output = terminal.getvalue()
         self.assertIn("___", output)
         self.assertTrue(output.isascii())
+
+    def test_scan_progress_throttles_redraws_but_keeps_transitions(self):
+        events = []
+        progress = ui.ScanProgress(True, lambda *event: events.append(event))
+        with patch.object(ui.time, "monotonic", return_value=1.0):
+            for current in range(1, 101):
+                progress.update("OpenCode", current, 100, current, 100, "records")
+            progress.update("Codex", 1, 2, 1, 2)
+
+        self.assertEqual(
+            [(event[0], event[1]) for event in events],
+            [("OpenCode", 1), ("OpenCode", 100), ("Codex", 1)],
+        )
 
     def test_session_rows_gain_adaptive_bars(self):
         for width, cells in ((100, 12), (90, 8), (89, 0)):
@@ -583,11 +604,11 @@ class ActionTests(unittest.TestCase):
             available_actions(session("claude", source="claude")), {"trash"}
         )
 
-    def test_read_only_source_skips_empty_dialog(self):
+    def test_source_without_storage_actions_skips_empty_dialog(self):
         with patch.object(views, "confirm_session_action") as dialog:
             screen = browse_screen([session("omp", source="omp")], [ord("a"), ord("q")])
         dialog.assert_not_called()
-        self.assertIn("read-only", frame_text(screen))
+        self.assertIn("no storage actions", frame_text(screen))
         self.assertNotIn("a action", frame_text(screen))
 
     def test_action_dialog_explains_scope_cost_and_shortcuts(self):
@@ -618,6 +639,40 @@ class ActionTests(unittest.TestCase):
             browse_screen([root, child], [ord("a"), ord("q")])
         self.assertEqual(seen, ["child", "root"])
 
+    def test_native_tree_action_invokes_source_once_and_removes_descendants(self):
+        root = session("ses_root", source="opencode", size_is_logical=True)
+        child = session(
+            "ses_child", "ses_root", source="opencode", size_is_logical=True
+        )
+        entries = [root, child]
+        with (
+            patch.object(views, "confirm_session_action", return_value="delete tree"),
+            patch.object(views, "confirm_permanent_delete", return_value=True),
+            patch.object(source_api, "prepare_session_actions") as prepare,
+            patch.object(
+                source_api,
+                "perform_prepared_action",
+                return_value=transcripts.ActionResult(),
+            ) as perform,
+            patch.object(transcripts, "record_action") as record,
+        ):
+            browse_screen(entries, [ord("a"), ord("q")])
+        prepare.assert_called_once_with([child, root], "delete")
+        perform.assert_called_once_with(root, "delete")
+        record.assert_called_once()
+        self.assertEqual(entries, [])
+
+    def test_native_tree_action_dialog_has_no_misleading_single_delete(self):
+        root = session("ses_root", source="opencode", size_is_logical=True)
+        child = session(
+            "ses_child", "ses_root", source="opencode", size_is_logical=True
+        )
+        screen = Screen([ord("q")], width=120)
+        self.assertIsNone(views.confirm_session_action(screen, root, [child, root]))
+        text = " ".join(item[2] for item in screen.frames[0])
+        self.assertIn("d  Delete tree", text)
+        self.assertIn("removes ~20 B logical", text)
+
     def test_codex_action_rejects_bad_ids_and_bounds_subprocess(self):
         with patch.object(codex.subprocess, "run") as run:
             with self.assertRaisesRegex(OSError, "invalid Codex session ID"):
@@ -641,6 +696,34 @@ class ActionTests(unittest.TestCase):
             self.assertRaisesRegex(OSError, "timed out"),
         ):
             codex.perform_action(session(identifier), "archive")
+
+    def test_codex_preflight_rejects_changed_or_invalid_tree_before_mutation(self):
+        identifier = "019bcb82-bef5-7503-88a7-e192d75fc3b8"
+        with tempfile.TemporaryDirectory() as directory:
+            first_path = Path(directory) / "first.jsonl"
+            second_path = Path(directory) / "second.jsonl"
+            first_path.write_text("first")
+            second_path.write_text("second")
+            first_stat = first_path.stat()
+            second_stat = second_path.stat()
+            first = replace(
+                session(identifier),
+                path=first_path,
+                size=first_stat.st_size,
+                modified=first_stat.st_mtime,
+            )
+            second = replace(
+                session("c6ddbb4f-d960-4b95-85ce-658618f587a1"),
+                path=second_path,
+                size=second_stat.st_size,
+                modified=second_stat.st_mtime,
+            )
+            second_path.write_text("changed")
+
+            with self.assertRaisesRegex(OSError, "changed since scan"):
+                codex.prepare_actions([first, second], "delete")
+            with self.assertRaisesRegex(OSError, "invalid Codex session ID"):
+                codex.prepare_actions([replace(first, session_id="--help")], "delete")
 
     def test_codex_action_verifies_native_storage_change(self):
         identifier = "019bcb82-bef5-7503-88a7-e192d75fc3b8"
@@ -672,6 +755,7 @@ class ActionTests(unittest.TestCase):
 
             def archive(*_args, **_kwargs):
                 destination.parent.mkdir()
+                path.write_text("changed during archive\n")
                 path.rename(destination)
                 return completed
 
@@ -679,6 +763,65 @@ class ActionTests(unittest.TestCase):
                 outcome = codex.perform_action(entry, "archive")
             self.assertEqual(outcome.replacement.path, destination)
             self.assertTrue(outcome.replacement.archived)
+            self.assertEqual(outcome.replacement.size, destination.stat().st_size)
+            self.assertEqual(outcome.replacement.modified, destination.stat().st_mtime)
+            codex.prepare_actions([outcome.replacement], "unarchive")
+
+    def test_kimi_export_is_native_verified_and_keeps_session(self):
+        entry = session("session_test-001", source="kimi")
+        completed = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "session-session_test-001.zip"
+
+            def export(command, **_kwargs):
+                with zipfile.ZipFile(destination, "w") as archive:
+                    archive.writestr("state.json", "{}")
+                return completed
+
+            with (
+                patch.object(kimi, "export_destination", return_value=destination),
+                patch.object(kimi.subprocess, "run", side_effect=export) as run,
+            ):
+                outcome = kimi.perform_action(entry, "export")
+
+        self.assertEqual(outcome.replacement, entry)
+        self.assertEqual(outcome.destination, destination)
+        self.assertEqual(
+            run.call_args.args[0],
+            [
+                "kimi",
+                "export",
+                "session_test-001",
+                "--output",
+                str(destination),
+                "--no-include-global-log",
+            ],
+        )
+        self.assertIn("export", available_actions(entry))
+        self.assertNotIn(
+            "export",
+            available_actions(replace(entry, origin="subagent")),
+        )
+
+    def test_kimi_export_runs_from_action_dialog_and_keeps_row(self):
+        entry = session("session_test-001", source="kimi")
+        destination = Path("/tmp/session-session_test-001.zip")
+        entries = [entry]
+        with (
+            patch.object(source_api, "prepare_session_actions") as prepare,
+            patch.object(
+                source_api,
+                "perform_prepared_action",
+                return_value=transcripts.ActionResult(destination, entry),
+            ) as perform,
+            patch.object(transcripts, "record_action"),
+        ):
+            screen = browse_screen(entries, [ord("a"), 10, ord("q")])
+
+        prepare.assert_called_once_with([entry], "export")
+        perform.assert_called_once_with(entry, "export")
+        self.assertEqual(entries, [entry])
+        self.assertIn("Exported to /tmp/session-session_test-001.zip", frame_text(screen))
 
     def test_claude_actions_fail_closed_for_live_or_unverifiable_sessions(self):
         entry = session("live", source="claude")
@@ -711,10 +854,13 @@ class ActionTests(unittest.TestCase):
             patch.dict(os.environ, {"XDG_STATE_HOME": directory}),
         ):
             transcripts.record_action(
-                "delete", session("secret", title="private transcript content")
+                "export",
+                session("secret", title="private transcript content"),
+                Path("/tmp/session-secret.zip"),
             )
             record = (Path(directory) / "asdu" / "actions.jsonl").read_text()
         self.assertIn('"session_id":"secret"', record)
+        self.assertIn('"destination":"/tmp/session-secret.zip"', record)
         self.assertNotIn("private transcript content", record)
 
 
@@ -795,7 +941,8 @@ class CliAndReaderTests(unittest.TestCase):
         ):
             self.assertEqual(asdu.run_main(), 0)
         self.assertEqual(
-            scan.call_args.args[0], ("codex", "claude", "omp", "kimi")
+            scan.call_args.args[0],
+            ("codex", "claude", "omp", "kimi", "opencode"),
         )
         self.assertEqual(tui.call_args.args[1], "cwd")
         self.assertEqual(tui.call_args.args[3], Path.cwd().resolve())

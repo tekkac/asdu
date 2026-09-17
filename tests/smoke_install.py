@@ -1,6 +1,8 @@
 """Linux wheel smoke test. Run through tests/Dockerfile with disposable data."""
 
+import json
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -13,7 +15,7 @@ import asdu_browser
 import asdu_sessions
 import asdu_tui as ui
 import asdu_views as views
-from asdu_sources import claude, codex, kimi, omp
+from asdu_sources import claude, codex, kimi, omp, opencode
 
 
 class InstalledSmoke(unittest.TestCase):
@@ -48,9 +50,55 @@ class InstalledSmoke(unittest.TestCase):
             shutil.copytree(fixtures / "kimi-code" / "sessions", kimi_root)
             roots[kimi] = kimi_root
             entries.extend(kimi.discover(kimi_root, ui.ScanProgress(False)))
+
+            opencode_db = root / "opencode.db"
+            with sqlite3.connect(opencode_db) as database:
+                database.executescript(
+                    """
+                    CREATE TABLE session (
+                      id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT,
+                      title TEXT, time_updated INTEGER, time_archived INTEGER
+                    );
+                    CREATE TABLE message (
+                      id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER,
+                      time_updated INTEGER, data TEXT
+                    );
+                    CREATE TABLE part (
+                      id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT,
+                      time_created INTEGER, time_updated INTEGER, data TEXT
+                    );
+                    INSERT INTO session VALUES (
+                      'ses_fixture001', NULL, '/workspace/demo',
+                      'OpenCode fixture', 1000, NULL
+                    );
+                    """
+                )
+                database.execute(
+                    "INSERT INTO message VALUES (?, ?, ?, ?, ?)",
+                    (
+                        "msg_fixture001",
+                        "ses_fixture001",
+                        1000,
+                        1000,
+                        json.dumps({"role": "assistant"}),
+                    ),
+                )
+                database.execute(
+                    "INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        "prt_fixture001",
+                        "msg_fixture001",
+                        "ses_fixture001",
+                        1000,
+                        1000,
+                        json.dumps({"type": "text", "text": "fixture inspected"}),
+                    ),
+                )
+            roots[opencode] = opencode_db
+            entries.extend(opencode.discover(opencode_db, ui.ScanProgress(False)))
             self.assertEqual(
                 {entry.source for entry in entries},
-                {"codex", "claude", "kimi", "omp"},
+                {"codex", "claude", "kimi", "omp", "opencode"},
             )
             for entry in entries:
                 self.assertIn("fixture inspected", views.digest(entry))
@@ -64,6 +112,8 @@ class InstalledSmoke(unittest.TestCase):
                 str(roots[omp]),
                 "--kimi-root",
                 str(roots[kimi]),
+                "--opencode-db",
+                str(roots[opencode]),
                 "--no-progress",
             ]
             self.assertTrue(

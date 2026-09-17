@@ -30,6 +30,15 @@ The physical bytes attributed to one displayed session. A byte belongs to
 exactly one session even when a source groups a main session, child sessions,
 and shared artifacts inside one session bundle.
 
+**Shared session store**:
+A source-owned database in which sessions share pages, indexes, and other
+records, so its physical bytes cannot be assigned exactly to individual
+sessions.
+
+**Logical session size**:
+The serialized session-owned content inside a shared session store. It is useful
+for comparing sessions, but is not an exact measure of reclaimable disk space.
+
 **Session title**:
 A display name taken from the source when available, otherwise derived from the
 session's goal or conversation. A native user-assigned name takes precedence.
@@ -41,9 +50,16 @@ sessions.
 _Avoid_: Plugin, provider
 
 **Session action**:
-A reviewed lifecycle operation supported by the source that owns a session.
-Codex provides archive, restore, and delete. Claude session files can move to
-the system Trash.
+A reviewed operation supported by the source that owns a session. Storage
+actions change lifecycle or remove data; export actions create a verified copy
+and retain the session. Codex provides archive, restore, and delete. Claude
+session files can move to the system Trash. Kimi provides export. OpenCode
+provides native deletion of a session and its descendants.
+
+**Action scope**:
+The sessions changed by one source-native action. Some actions affect only the
+selected session; others inherently include its descendants. asdu must present
+and invoke the source's real scope rather than repeat an action per row.
 
 **Runtime agent**:
 A live or background execution associated with a stored session. Its short ID

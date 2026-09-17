@@ -12,14 +12,26 @@ from asdu_sessions import (
     SessionControls,
 )
 
-from . import claude, codex, kimi, omp
+from . import claude, codex, kimi, omp, opencode
 
-READERS = {"codex": codex, "claude": claude, "kimi": kimi, "omp": omp}
+READERS = {
+    "codex": codex,
+    "claude": claude,
+    "kimi": kimi,
+    "omp": omp,
+    "opencode": opencode,
+}
 
 
 def available_actions(session: Session) -> frozenset[str]:
     actions = getattr(READERS[session.source], "available_actions", None)
     return actions(session) if callable(actions) else frozenset()
+
+
+def action_scope(session: Session, action: str) -> str:
+    """Return whether asdu or the source owns descendant traversal."""
+    scope = getattr(READERS[session.source], "action_scope", None)
+    return scope(session, action) if callable(scope) else "selectable-tree"
 
 
 @dataclass(frozen=True)
@@ -33,12 +45,15 @@ def source_adapters(
     claude_root: Path,
     omp_root: Path | None = None,
     kimi_root: Path | None = None,
+    opencode_db: Path | None = None,
 ) -> dict[str, SourceAdapter]:
     roots = {"codex": codex_root, "claude": claude_root}
     if omp_root is not None:
         roots["omp"] = omp_root
     if kimi_root is not None:
         roots["kimi"] = kimi_root
+    if opencode_db is not None:
+        roots["opencode"] = opencode_db
     return {
         name: SourceAdapter(root, READERS[name].discover)
         for name, root in roots.items()
@@ -88,8 +103,8 @@ def prepare_session_actions(sessions: list[Session], action: str) -> None:
 def perform_prepared_action(session: Session, action: str) -> ActionResult:
     """Run one source action after its complete scope has been validated."""
     if action not in available_actions(session):
-        raise OSError(f"{session.source} sessions are read-only for {action}")
+        raise OSError(f"{session.source} does not support {action}")
     handler = getattr(READERS[session.source], "perform_action", None)
     if not callable(handler):
-        raise OSError(f"{session.source} sessions are read-only for {action}")
+        raise OSError(f"{session.source} does not support {action}")
     return handler(session, action)

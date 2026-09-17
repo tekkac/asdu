@@ -24,6 +24,7 @@ from asdu_sessions import (
 )
 
 CONTENT_RIGHT_MARGIN = 3
+PROGRESS_FRAME_SECONDS = 0.05
 
 
 class ScanProgress:
@@ -32,7 +33,7 @@ class ScanProgress:
     def __init__(
         self,
         enabled: bool,
-        render: Callable[[str, int, int, int, int], None] | None = None,
+        render: Callable[[str, int, int, int, int, str], None] | None = None,
     ) -> None:
         self.enabled = enabled
         self.render = render
@@ -40,6 +41,8 @@ class ScanProgress:
         self.wrote_line = False
         self.panel_left = 0
         self.has_panel = False
+        self.last_render_at = 0.0
+        self.last_render_source = ""
         self.skipped: set[Path] = set()
         self.invalid: set[Path] = set()
         if self.interactive and render is None:
@@ -59,10 +62,16 @@ class ScanProgress:
             sys.stderr.flush()
 
     def paint(
-        self, source: str, current: int, count: int, done: int, total: int
+        self,
+        source: str,
+        current: int,
+        count: int,
+        done: int,
+        total: int,
+        unit: str,
     ) -> None:
         if self.has_panel:
-            content = view.indexing_panel(source, current, done, total)[1:4]
+            content = view.indexing_panel(source, current, done, total, unit)[1:4]
             sys.stderr.write("\033[4A")
             for index, line in enumerate(content):
                 sys.stderr.write("\r" + " " * self.panel_left + line + "\033[K")
@@ -77,26 +86,43 @@ class ScanProgress:
             width = 79
         sys.stderr.write(
             "\r"
-            + view.scan_status(source, current, count, done, total, width)
+            + view.scan_status(source, current, count, done, total, width, unit)
             + "\033[K"
         )
         sys.stderr.flush()
         self.wrote_line = True
 
     def update(
-        self, source: str, current: int, total: int, done_bytes: int, total_bytes: int
+        self,
+        source: str,
+        current: int,
+        total: int,
+        done_bytes: int,
+        total_bytes: int,
+        unit: str = "sessions",
     ) -> None:
         if not self.enabled or total == 0:
             return
+        now = time.monotonic()
+        source_changed = source != self.last_render_source
+        complete = current >= total
+        if (
+            not source_changed
+            and not complete
+            and now - self.last_render_at < PROGRESS_FRAME_SECONDS
+        ):
+            return
+        self.last_render_at = now
+        self.last_render_source = source
         # Disk usage is the reason for the scan, so the bar tracks bytes
         # rather than treating a thousand tiny rollouts like one huge one.
         done_bytes = min(done_bytes, total_bytes)
         if self.render is not None:
-            self.render(source, current, total, done_bytes, total_bytes)
+            self.render(source, current, total, done_bytes, total_bytes, unit)
             return
         if not self.interactive:
             return
-        self.paint(source, current, total, done_bytes, total_bytes)
+        self.paint(source, current, total, done_bytes, total_bytes, unit)
 
     def finish(self) -> None:
         if self.interactive and self.wrote_line:
@@ -615,7 +641,10 @@ def render_tui_frame(window: curses.window, state: TuiState) -> TuiFrame:
                 if bar_width
                 else ""
             )
-            text = f"{view.human_size(group_size):>10}  {bar}{len(entries):>5}  {display_name}"
+            text = (
+                f"{view.aggregate_size(entries):>10}  "
+                f"{bar}{len(entries):>5}  {display_name}"
+            )
             view.draw_line(
                 window,
                 row,
@@ -706,7 +735,7 @@ def render_tui_frame(window: curses.window, state: TuiState) -> TuiFrame:
             state.source_roots
             or {s.source: Path(s.source_home) for s in state.sessions}
         )
-        names = ", ".join("OMP" if name == "omp" else name.title() for name in sources)
+        names = ", ".join(view.source_name(name) for name in sources)
         message = (
             f"  No sessions match: {', '.join(active_filters)}"
             if active_filters
@@ -726,7 +755,7 @@ def render_tui_frame(window: curses.window, state: TuiState) -> TuiFrame:
                 window,
                 row,
                 f"  {path:<28}  {len(entries):>6,} sessions  "
-                f"{view.human_size(sum(session.size for session in entries)):>10}",
+                f"{view.aggregate_size(entries):>10}",
                 dim=True,
             )
             row += 1
@@ -742,7 +771,7 @@ def render_tui_frame(window: curses.window, state: TuiState) -> TuiFrame:
                 row + 1,
                 f"  Press Backspace to go up to {view.short_path(str(parent))} "
                 f"({len(parent_entries):,} sessions, "
-                f"{view.human_size(sum(session.size for session in parent_entries))})",
+                f"{view.aggregate_size(parent_entries)})",
             )
 
     footer_sessions = (
@@ -752,7 +781,6 @@ def render_tui_frame(window: curses.window, state: TuiState) -> TuiFrame:
         if browser.detail is not None
         else scoped
     )
-    footer_size = sum(session.size for session in footer_sessions)
     label = f" asdu  {location}"
     if active_filters:
         label += "  " + "  ".join(active_filters)
@@ -768,9 +796,7 @@ def render_tui_frame(window: curses.window, state: TuiState) -> TuiFrame:
             ]
         )
         count = f"{len(unfiltered_scope):,} → {len(footer_sessions):,} sessions"
-    ordering = (
-        f"{view.human_size(footer_size)}  {count}  {model.sort_label(state.sort_by)} "
-    )
+    ordering = f"{view.aggregate_size(footer_sessions)}  {count}  {model.sort_label(state.sort_by)} "
     available = max(0, width - 1 - view.display_width(ordering))
     view.draw_line(
         window,
@@ -959,7 +985,7 @@ def rescan_sessions(
     window: curses.window,
     state: TuiState,
     frame: TuiFrame,
-    rescan: Callable[[Callable[[str, int, int, int, int], None]], list[Session]],
+    rescan: Callable[[Callable[[str, int, int, int, int, str], None]], list[Session]],
 ) -> None:
     """Rescan storage while preserving the current browser context."""
     browser = state.browser
@@ -972,6 +998,7 @@ def rescan_sessions(
         total: int,
         done_bytes: int,
         total_bytes: int,
+        unit: str,
     ) -> None:
         window.erase()
         _, width = window.getmaxyx()
@@ -983,6 +1010,7 @@ def rescan_sessions(
             done_bytes,
             total_bytes,
             max(0, width - 3),
+            unit,
         )
         view.draw_line(window, 2, "  " + status)
         window.refresh()
@@ -1005,13 +1033,14 @@ def run_session_action(
 ) -> None:
     """Choose and execute one source-supported lifecycle action."""
     if not source.available_actions(entry):
-        state.status = f"{entry.source.upper()} sessions are read-only."
+        state.status = f"{entry.source.upper()} has no storage actions."
         return
     subtree = model.session_subtree(state.sessions, entry)
     choice = view.confirm_session_action(window, entry, subtree)
     tree_action = bool(choice and choice.endswith(" tree"))
     action = choice.removesuffix(" tree") if choice else None
-    targets = subtree if tree_action else [entry]
+    scope = source.action_scope(entry, action) if action is not None else "single"
+    targets = subtree if tree_action or scope == "native-tree" else [entry]
     targets = [
         target
         for target in targets
@@ -1033,6 +1062,7 @@ def run_session_action(
         return
 
     result = {
+        "export": "Exported",
         "archive": "Archived",
         "unarchive": "Unarchived",
         "trash": "Trashed",
@@ -1041,39 +1071,55 @@ def run_session_action(
     failures = []
     log_error = None
     changed = 0
-    for target in targets:
+    destination = None
+    invocations = [entry] if scope == "native-tree" else targets
+    for target in invocations:
         try:
             outcome = source.perform_prepared_action(target, action)
         except OSError as error:
             failures.append(str(error))
             break
-        changed += 1
+        destination = outcome.destination or destination
+        affected = targets if scope == "native-tree" else [target]
+        changed += len(affected)
         try:
-            store.record_action(action, target, outcome.destination)
+            store.record_action(
+                action,
+                target,
+                outcome.destination,
+                affected_count=len(affected),
+                affected_size=sum(item.size for item in affected),
+            )
         except OSError as error:
             log_error = error
-        replacement = outcome.replacement
         views = [state.sessions]
         if state.browser.detail is not None:
             views.append(state.browser.detail[1])
         if state.search_results is not None:
             views.append(state.search_results)
-        for entries in views:
-            if target not in entries:
-                continue
-            position = entries.index(target)
-            if replacement is None:
-                entries.pop(position)
-            else:
-                entries[position] = replacement
+        for changed_target in affected:
+            replacement = (
+                outcome.replacement
+                if changed_target.storage_key == target.storage_key
+                else None
+            )
+            for entries in views:
+                if changed_target not in entries:
+                    continue
+                position = entries.index(changed_target)
+                if replacement is None:
+                    entries.pop(position)
+                else:
+                    entries[position] = replacement
     state.view_key = None
     if failures:
         state.status = f"{result} {changed}/{len(targets)}; stopped: {failures[0]}"
     else:
+        affected = targets[:changed]
         freed = (
             0
-            if action in {"archive", "unarchive"}
-            else sum(target.size for target in targets[:changed])
+            if action in {"export", "archive", "unarchive"}
+            else sum(target.size for target in affected)
         )
         if state.search_results is not None:
             current = state.search_results
@@ -1081,17 +1127,27 @@ def run_session_action(
             current = state.browser.detail[1]
         else:
             current = state.current_view()[3]
-        scope_total = sum(item.size for item in current)
         permanence = {
+            "export": "session kept",
             "archive": "reversible",
             "unarchive": "restored",
             "trash": "recoverable",
             "delete": "permanent",
         }[action]
         count = f"{changed} sessions | " if changed > 1 else ""
+        amount = view.session_size(
+            freed, any(target.size_is_logical for target in affected)
+        )
+        if any(target.size_is_logical for target in affected):
+            amount += " logical"
         state.status = (
-            f"{result} {count}{view.human_size(freed)} | {entry.source} "
-            f"{entry.session_id[:18]} | {view.human_size(scope_total)} now | {permanence}"
+            f"Exported to {view.short_path(str(destination))} | {permanence}"
+            if action == "export" and destination is not None
+            else (
+                f"{result} {count}{amount} | {entry.source} "
+                f"{entry.session_id[:18]} | {view.aggregate_size(current)} now | "
+                f"{permanence}"
+            )
         )
     if log_error is not None:
         state.status += f"; action log unavailable: {log_error}"
@@ -1217,7 +1273,7 @@ def handle_tui_key(
     state: TuiState,
     frame: TuiFrame,
     key: int,
-    rescan: Callable[[Callable[[str, int, int, int, int], None]], list[Session]],
+    rescan: Callable[[Callable[[str, int, int, int, int, str], None]], list[Session]],
 ) -> bool:
     """Apply one key to browser state; return false only when the TUI should exit."""
     browser = state.browser
@@ -1331,7 +1387,7 @@ def tui(
     initial_mode: str,
     initial_sort: str,
     start: Path,
-    rescan: Callable[[Callable[[str, int, int, int, int], None]], list[Session]],
+    rescan: Callable[[Callable[[str, int, int, int, int, str], None]], list[Session]],
     no_color: bool = False,
     source_roots: dict[str, Path] | None = None,
 ) -> None:
@@ -1432,6 +1488,8 @@ def open_brief(
     """Display a bounded preview, then full results; only the UI thread draws."""
     sizes = view.brief_sizes(session, entries)
     known = [sizes, f"ID: {session.session_id}", f"Folder: {session.cwd}"]
+    if session.archived:
+        known.append("Storage: archived")
     if session.task_path:
         known.append(f"Task: {session.task_path}")
     if session.forked_from:

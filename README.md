@@ -11,7 +11,8 @@
             agent session disk usage
 ```
 
-`asdu` shows where Codex, Claude, Kimi, and OMP sessions use disk space.
+`asdu` shows where Codex, Claude, Kimi, OpenCode, and OMP sessions use disk
+space.
 
 It works like a file browser. Start in a folder, inspect its sessions, and move
 up or down the directory tree. Everything stays local.
@@ -54,8 +55,8 @@ folded.
     74.2 MiB  ████████████      5  /api
     38.1 MiB  ██████▏░░░░░      3  /docs
 
-›   23.5 MiB  ████████████  codex   main    now       ▸ Fix flaky tests (+2)
-     8.1 MiB  ████▏░░░░░░░  claude  main    12m ago   Review the release notes
+›   23.5 MiB  ████████████  codex     main    now       ▸ Fix flaky tests (+2)
+     8.1 MiB  ████▏░░░░░░░  claude    main    12m ago   Review the release notes
 
  codex 019bcb82-bef5-7503 | 2026-09-09 11:52 | ~/.codex/sessions/…jsonl
  Enter open  Backspace back  a action  t tree  / find  g group  f source  F type  s sort   ? help  q quit
@@ -108,11 +109,14 @@ Resume: claude --resume demo-css-001
 Browsing never changes a session. Press `a` to review an action before it runs.
 
 Codex archive and restore use Codex itself. Codex delete is permanent. Claude
-sessions can move to the system Trash. Tree actions include folded descendants.
+sessions can move to the system Trash. OpenCode delete is permanent and includes
+the selected session's descendants. Tree actions include folded descendants.
 Active Claude sessions are refused.
 
-Kimi and OMP sessions are read-only. Kimi's native agents appear as tree
-children.
+OpenCode stores sessions together in SQLite. Its `~` sizes rank logical session
+content; deleting one may not immediately shrink the database file. Kimi can
+export a verified session ZIP to the current directory; it does not provide a
+CLI storage action. OMP has no actions. Native child agents appear as trees.
 
 Successful actions append a content-free record to
 `$XDG_STATE_HOME/asdu/actions.jsonl`, normally
