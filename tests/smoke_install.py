@@ -1,6 +1,7 @@
 """Linux wheel smoke test. Run through tests/Dockerfile with disposable data."""
 
 import json
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -24,7 +25,9 @@ class InstalledSmoke(unittest.TestCase):
         for module in (asdu, asdu_browser, asdu_sessions, ui, views):
             installed = Path(module.__file__).resolve()
             self.assertNotEqual(installed, source / installed.name)
-        executable = Path(sys.executable).with_name("asdu")
+        executable = Path(sys.executable).with_name(
+            "asdu.exe" if os.name == "nt" else "asdu"
+        )
         self.assertEqual(
             subprocess.check_output([executable, "--version"], text=True).strip(),
             f"asdu {version('asdu')}",

@@ -11,7 +11,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Protocol
 
 
@@ -97,6 +97,23 @@ class SessionControls:
 class ActionResult:
     destination: Path | None = None
     replacement: Session | None = None
+
+
+def is_filesystem_root(path: PurePath) -> bool:
+    """Return whether a path is its POSIX root or Windows drive/share root."""
+    return path.parent == path
+
+
+def short_home_path(path: str, home: str | None = None) -> str:
+    """Contract a path below home without assuming one platform's separator."""
+    home = home or str(Path.home())
+    flavor = PureWindowsPath if PureWindowsPath(home).drive else PurePosixPath
+    candidate, base = flavor(path), flavor(home)
+    try:
+        relative = candidate.relative_to(base)
+    except ValueError:
+        return path
+    return "~" if not relative.parts else str(flavor("~") / relative)
 
 
 def session_label(session: Session) -> str:

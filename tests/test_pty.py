@@ -1,23 +1,30 @@
 """Small real-PTY checks; fictional data only, no terminal emulator required."""
 
-import fcntl
 import json
 import os
-import pty
 import select
 import signal
 import struct
 import subprocess
 import sys
 import tempfile
-import termios
 import time
 import unittest
 from pathlib import Path
 
+if os.name == "posix":
+    import fcntl
+    import pty
+    import termios
+else:
+    fcntl = None
+    pty = None
+    termios = None
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@unittest.skipUnless(os.name == "posix", "real PTY checks require POSIX")
 class TerminalTests(unittest.TestCase):
     zellij = False
 

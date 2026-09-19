@@ -27,6 +27,42 @@ CONTENT_RIGHT_MARGIN = 3
 PROGRESS_FRAME_SECONDS = 0.05
 
 
+def initialize_colors(no_color: bool) -> bool:
+    """Initialize ncurses or PDCurses colors with a conservative background."""
+    if no_color or os.environ.get("NO_COLOR") or not curses.has_colors():
+        return False
+    try:
+        curses.start_color()
+    except curses.error:
+        return False
+    background = -1
+    try:
+        curses.use_default_colors()
+    except (AttributeError, curses.error):
+        background = curses.COLOR_BLACK
+    color_count = getattr(curses, "COLORS", 0)
+    colors = {
+        1: curses.COLOR_GREEN,
+        2: curses.COLOR_YELLOW,
+        3: curses.COLOR_MAGENTA,
+        4: curses.COLOR_CYAN,
+        5: curses.COLOR_RED,
+        6: curses.COLOR_BLUE,
+        7: 33 if color_count >= 256 else curses.COLOR_CYAN,
+        8: 208 if color_count >= 256 else curses.COLOR_YELLOW,
+        10: 37 if color_count >= 256 else curses.COLOR_GREEN,
+        11: 141 if color_count >= 256 else curses.COLOR_MAGENTA,
+    }
+    for pair, color in colors.items():
+        curses.init_pair(pair, color, background)
+    curses.init_pair(
+        view.SELECTED_COLOR,
+        222 if color_count >= 256 else curses.COLOR_YELLOW,
+        236 if color_count >= 256 else curses.COLOR_BLACK,
+    )
+    return True
+
+
 class ScanProgress:
     """TTY-only startup banner and in-place scan progress."""
 
@@ -345,10 +381,8 @@ class TuiState:
             )
             scoped = (
                 grouped
-                if self.mode == "cwd" and self.browser.cwd_node == Path("/")
-                else [s for s in grouped if store.in_scope(s, self.browser.cwd_node)]
-                if self.mode == "cwd"
-                else grouped
+                if self.mode != "cwd"
+                else model.scoped_sessions(grouped, self.browser.cwd_node)
             )
             self.view_data = visible, grouped, items, scoped
             self.view_key = key
@@ -759,13 +793,9 @@ def render_tui_frame(window: curses.window, state: TuiState) -> TuiFrame:
                 dim=True,
             )
             row += 1
-        if browser.cwd_node != Path("/") and row < height - 2:
+        if not store.is_filesystem_root(browser.cwd_node) and row < height - 2:
             parent = browser.cwd_node.parent
-            parent_entries = [
-                session
-                for session in visible
-                if parent == Path("/") or store.in_scope(session, parent)
-            ]
+            parent_entries = model.scoped_sessions(visible, parent)
             view.draw_line(
                 window,
                 row + 1,
@@ -787,13 +817,7 @@ def render_tui_frame(window: curses.window, state: TuiState) -> TuiFrame:
     count = f"{len(footer_sessions):,} sessions"
     if active_filters and browser.detail is None and not searching:
         unfiltered_scope = (
-            state.sessions
-            if browser.cwd_node == Path("/")
-            else [
-                session
-                for session in state.sessions
-                if store.in_scope(session, browser.cwd_node)
-            ]
+            model.scoped_sessions(state.sessions, browser.cwd_node)
         )
         count = f"{len(unfiltered_scope):,} → {len(footer_sessions):,} sessions"
     ordering = f"{view.aggregate_size(footer_sessions)}  {count}  {model.sort_label(state.sort_by)} "
@@ -831,7 +855,10 @@ def render_tui_frame(window: curses.window, state: TuiState) -> TuiFrame:
     if (
         searching
         or browser.detail is not None
-        or (state.mode == "cwd" and browser.cwd_node != Path("/"))
+        or (
+            state.mode == "cwd"
+            and not store.is_filesystem_root(browser.cwd_node)
+        )
     ):
         commands.append("Backspace back")
     if selected_entry is not None and source.available_actions(selected_entry):
@@ -1261,7 +1288,7 @@ def go_back(state: TuiState, frame: TuiFrame) -> None:
         state.search_return = None
     elif browser.detail is not None:
         browser.leave_detail()
-    elif state.mode == "cwd" and browser.cwd_node != Path("/"):
+    elif state.mode == "cwd" and not store.is_filesystem_root(browser.cwd_node):
         browser.visit_folder(
             browser.cwd_node.parent,
             model.item_key(frame.items[browser.selected]) if frame.items else None,
@@ -1393,9 +1420,14 @@ def tui(
 ) -> None:
     """A small ncdu-like drill-down UI with explicit source-aware actions."""
 
+    sgr_mouse = os.name != "nt" and not os.environ.get("ZELLIJ")
+
     def run(raw_window: curses.window) -> None:
         window = TerminalWindow(raw_window)
-        curses.curs_set(0)
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
         # Zellij owns pane-local selection and translates alternate-screen
         # scrolling into arrows. Capturing clicks here steals its selection.
         capture_mouse = not os.environ.get("ZELLIJ")
@@ -1409,35 +1441,11 @@ def tui(
             curses.mouseinterval(0)
         except curses.error:
             pass
-        if capture_mouse and sys.stdout.isatty():
+        if sgr_mouse and sys.stdout.isatty():
             sys.stdout.write("\x1b[?1000h\x1b[?1006h")
             sys.stdout.flush()
 
-        window.colors_enabled = (
-            not (no_color or os.environ.get("NO_COLOR")) and curses.has_colors()
-        )
-        if window.colors_enabled:
-            curses.start_color()
-            curses.use_default_colors()
-            colors = {
-                1: curses.COLOR_GREEN,
-                2: curses.COLOR_YELLOW,
-                3: curses.COLOR_MAGENTA,
-                4: curses.COLOR_CYAN,
-                5: curses.COLOR_RED,
-                6: curses.COLOR_BLUE,
-                7: 33 if curses.COLORS >= 256 else curses.COLOR_CYAN,
-                8: 208 if curses.COLORS >= 256 else curses.COLOR_YELLOW,
-                10: 37 if curses.COLORS >= 256 else curses.COLOR_GREEN,
-                11: 141 if curses.COLORS >= 256 else curses.COLOR_MAGENTA,
-            }
-            for pair, color in colors.items():
-                curses.init_pair(pair, color, -1)
-            curses.init_pair(
-                view.SELECTED_COLOR,
-                222 if curses.COLORS >= 256 else curses.COLOR_YELLOW,
-                236 if curses.COLORS >= 256 else curses.COLOR_BLACK,
-            )
+        window.colors_enabled = initialize_colors(no_color)
 
         cwd_root = start
         state = TuiState(
@@ -1472,7 +1480,7 @@ def tui(
     try:
         curses.wrapper(run)
     finally:
-        if sys.stdout.isatty():
+        if os.name != "nt" and sys.stdout.isatty():
             sys.stdout.write("\x1b[?1000l\x1b[?1006l")
             sys.stdout.flush()
     clear_terminal()

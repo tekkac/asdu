@@ -7,7 +7,13 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from asdu_sessions import Session, in_scope, session_label
+from asdu_sessions import (
+    Session,
+    in_scope,
+    is_filesystem_root,
+    session_label,
+    short_home_path,
+)
 
 
 def session_type(session: Session) -> str:
@@ -41,12 +47,18 @@ def browser_visible_sessions(
         if (source_filter == "all" or session.source == source_filter)
         and (type_filter == "all" or session_type(session) == type_filter)
     ]
-    grouped = (
-        visible
-        if cwd_node == Path("/")
-        else [session for session in visible if in_scope(session, cwd_node)]
-    )
+    grouped = scoped_sessions(visible, cwd_node)
     return visible, visible if mode == "cwd" else grouped
+
+
+def scoped_sessions(sessions: Iterable[Session], directory: Path) -> list[Session]:
+    """Return sessions below one filesystem root, plus unknowns at that root."""
+    root = is_filesystem_root(directory)
+    return [
+        session
+        for session in sessions
+        if (root and session.cwd == "(unknown)") or in_scope(session, directory)
+    ]
 
 
 def item_key(item: tuple[str, str, list[Session]]) -> str:
@@ -99,7 +111,7 @@ def cwd_listing(
     direct: list[Session] = []
     for session in sessions:
         if session.cwd == "(unknown)":
-            if directory == Path("/"):
+            if is_filesystem_root(directory):
                 folders["(unknown folder)"].append(session)
             continue
         try:
@@ -129,10 +141,7 @@ def relative_folder(directory: Path, root: Path) -> str:
     except ValueError:
         value = directory
     text = str(value) if str(value) != "." else str(root)
-    home = str(Path.home())
-    return (
-        "~" + text[len(home) :] if text == home or text.startswith(home + "/") else text
-    )
+    return short_home_path(text)
 
 
 def ordered_sessions(sessions: Iterable[Session], sort_by: str) -> list[Session]:
@@ -333,12 +342,12 @@ class BrowserState:
     detail: tuple[str, list[Session]] | None = None
     detail_return: tuple[str, int] | None = None
     pending_anchor: str | None = None
-    cwd_node: Path = Path("/")
+    cwd_node: Path = field(default_factory=lambda: Path(Path.cwd().anchor))
     folder_positions: dict[Path, tuple[str | None, int]] = field(default_factory=dict)
 
     @classmethod
-    def create(cls, cwd: Path = Path("/")) -> BrowserState:
-        return cls(set(), {}, cwd_node=cwd)
+    def create(cls, cwd: Path | None = None) -> BrowserState:
+        return cls(set(), {}, cwd_node=cwd or Path(Path.cwd().anchor))
 
     def visit_folder(self, target: Path, anchor: str | None) -> None:
         self.folder_positions[self.cwd_node] = (anchor, self.offset)

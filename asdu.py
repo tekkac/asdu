@@ -1,7 +1,10 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["send2trash>=1.8.3"]
+# dependencies = [
+#   "send2trash>=1.8.3",
+#   "windows-curses>=2.4.2; sys_platform == 'win32'",
+# ]
 # ///
 """Command-line entry point for the local agent-session disk browser."""
 
@@ -19,7 +22,7 @@ import asdu_sources as sources_api
 import asdu_tui as ui
 import asdu_views as view
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 
 def default_root(variable: str, directory: str, leaf: str) -> Path:
@@ -186,11 +189,15 @@ def run_main() -> int:
 
     sessions = scan_current()
     if args.command == "summary":
-        scoped = (
-            sessions
-            if start == Path("/")
-            else [session for session in sessions if store.in_scope(session, start)]
-        )
+        scoped = [
+            session
+            for session in sessions
+            if store.in_scope(session, start)
+            or (
+                store.is_filesystem_root(start)
+                and session.cwd == "(unknown)"
+            )
+        ]
         view.print_summary(scoped, args.group, args.sort)
     elif args.command == "digest":
         if not args.session:

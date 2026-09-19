@@ -8,11 +8,12 @@ import os
 import sys
 import tempfile
 import time
+import tomllib
 import unittest
 import zipfile
 from contextlib import ExitStack
 from dataclasses import replace
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -130,6 +131,27 @@ def frame_row(screen, row):
 
 
 class BrowserTests(unittest.TestCase):
+    def test_filesystem_roots_are_platform_independent(self):
+        self.assertTrue(transcripts.is_filesystem_root(Path("/")))
+        self.assertTrue(
+            transcripts.is_filesystem_root(PureWindowsPath("C:/"))
+        )
+        self.assertFalse(
+            transcripts.is_filesystem_root(PureWindowsPath("C:/Users/demo"))
+        )
+
+    def test_home_shortening_handles_windows_separators(self):
+        self.assertEqual(
+            transcripts.short_home_path(
+                r"C:\Users\demo\Code\asdu", r"C:\Users\demo"
+            ),
+            r"~\Code\asdu",
+        )
+        self.assertEqual(
+            transcripts.short_home_path(r"D:\work", r"C:\Users\demo"),
+            r"D:\work",
+        )
+
     def test_all_sessions_is_a_view_not_a_synthetic_group(self):
         entries = [
             session("one", cwd="/project/a"),
@@ -415,6 +437,31 @@ class TreeTests(unittest.TestCase):
 
 
 class RenderingTests(unittest.TestCase):
+    def test_pdcurses_color_setup_falls_back_to_black(self):
+        initialized = []
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(ui.curses, "has_colors", return_value=True),
+            patch.object(ui.curses, "start_color"),
+            patch.object(
+                ui.curses,
+                "use_default_colors",
+                side_effect=ui.curses.error("unsupported"),
+            ),
+            patch.object(
+                ui.curses,
+                "init_pair",
+                side_effect=lambda pair, foreground, background: initialized.append(
+                    (pair, foreground, background)
+                ),
+            ),
+        ):
+            self.assertTrue(ui.initialize_colors(False))
+        self.assertTrue(initialized)
+        self.assertTrue(
+            all(background == ui.curses.COLOR_BLACK for _, _, background in initialized)
+        )
+
     def test_narrow_footer_keeps_help_and_quit(self):
         text = frame_text(browse_screen([session("one")], [ord("q")], width=60))
         self.assertIn("? help", text)
@@ -865,6 +912,14 @@ class ActionTests(unittest.TestCase):
 
 
 class CliAndReaderTests(unittest.TestCase):
+    def test_windows_curses_is_a_windows_only_dependency(self):
+        project = tomllib.loads((SCRIPT.parent / "pyproject.toml").read_text())
+        dependencies = project["project"]["dependencies"]
+        windows = [item for item in dependencies if item.startswith("windows-curses")]
+        self.assertEqual(len(windows), 1)
+        self.assertIn("sys_platform == 'win32'", windows[0])
+        self.assertIn(windows[0], SCRIPT.read_text())
+
     def test_digest_prefers_exact_id_over_child_prefixes(self):
         parent = transcripts.Session(
             FIXTURES / "rollout-codex.jsonl",
