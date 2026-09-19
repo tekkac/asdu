@@ -53,6 +53,7 @@ def browser_visible_sessions(
 
 def scoped_sessions(sessions: Iterable[Session], directory: Path) -> list[Session]:
     """Return sessions below one filesystem root, plus unknowns at that root."""
+    directory = directory.resolve()
     root = is_filesystem_root(directory)
     return [
         session
@@ -107,6 +108,7 @@ def cwd_listing(
     sessions: Iterable[Session], directory: Path, sort_by: str
 ) -> list[tuple[str, str, list[Session]]]:
     """Folder rows plus direct session rows, like an ncdu directory view."""
+    directory = directory.resolve()
     folders: dict[str, list[Session]] = defaultdict(list)
     direct: list[Session] = []
     for session in sessions:

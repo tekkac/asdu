@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import json
 import os
 import sys
 import tempfile
@@ -118,7 +119,7 @@ def browse_screen(
 
 
 def frame_text(screen):
-    return " ".join(text for _, _, text, _ in screen.frames[-1])
+    return " ".join(text for _, _, text, _ in screen.frames[-1]).replace("\\", "/")
 
 
 def frame_row(screen, row):
@@ -906,9 +907,12 @@ class ActionTests(unittest.TestCase):
                 Path("/tmp/session-secret.zip"),
             )
             record = (Path(directory) / "asdu" / "actions.jsonl").read_text()
-        self.assertIn('"session_id":"secret"', record)
-        self.assertIn('"destination":"/tmp/session-secret.zip"', record)
-        self.assertNotIn("private transcript content", record)
+            event = json.loads(record)
+            self.assertEqual(event["session_id"], "secret")
+            self.assertEqual(
+                event["destination"], str(Path("/tmp/session-secret.zip"))
+            )
+            self.assertNotIn("private transcript content", record)
 
 
 class CliAndReaderTests(unittest.TestCase):

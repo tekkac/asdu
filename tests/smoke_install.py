@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from importlib.metadata import version
 from pathlib import Path
 
@@ -55,7 +56,7 @@ class InstalledSmoke(unittest.TestCase):
             entries.extend(kimi.discover(kimi_root, ui.ScanProgress(False)))
 
             opencode_db = root / "opencode.db"
-            with sqlite3.connect(opencode_db) as database:
+            with closing(sqlite3.connect(opencode_db)) as database, database:
                 database.executescript(
                     """
                     CREATE TABLE session (

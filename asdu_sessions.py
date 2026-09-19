@@ -268,9 +268,9 @@ def in_scope(session: Session, scope: Path | None) -> bool:
     if session.cwd == "(unknown)":
         return False
     try:
-        Path(session.cwd).resolve().relative_to(scope)
+        Path(session.cwd).resolve().relative_to(scope.resolve())
         return True
-    except ValueError:
+    except (OSError, ValueError):
         return False
 
 
