@@ -1,12 +1,14 @@
 """Linux wheel smoke test. Run through tests/Dockerfile with disposable data."""
 
 import json
+import os
 import shutil
 import sqlite3
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from importlib.metadata import version
 from pathlib import Path
 
@@ -19,12 +21,25 @@ from asdu_sources import claude, codex, kimi, omp, opencode
 
 
 class InstalledSmoke(unittest.TestCase):
+    def run_cli(self, executable, *arguments):
+        result = subprocess.run(
+            [executable, *arguments], capture_output=True, text=True, check=False
+        )
+        self.assertEqual(
+            result.returncode,
+            0,
+            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}",
+        )
+        return result.stdout
+
     def test_installed_wheel(self):
         source = Path(__file__).resolve().parents[1]
         for module in (asdu, asdu_browser, asdu_sessions, ui, views):
             installed = Path(module.__file__).resolve()
             self.assertNotEqual(installed, source / installed.name)
-        executable = Path(sys.executable).with_name("asdu")
+        executable = Path(sys.executable).with_name(
+            "asdu.exe" if os.name == "nt" else "asdu"
+        )
         self.assertEqual(
             subprocess.check_output([executable, "--version"], text=True).strip(),
             f"asdu {version('asdu')}",
@@ -52,7 +67,7 @@ class InstalledSmoke(unittest.TestCase):
             entries.extend(kimi.discover(kimi_root, ui.ScanProgress(False)))
 
             opencode_db = root / "opencode.db"
-            with sqlite3.connect(opencode_db) as database:
+            with closing(sqlite3.connect(opencode_db)) as database, database:
                 database.executescript(
                     """
                     CREATE TABLE session (
@@ -116,27 +131,15 @@ class InstalledSmoke(unittest.TestCase):
                 str(roots[opencode]),
                 "--no-progress",
             ]
+            self.assertTrue(self.run_cli(executable, "summary", *arguments).strip())
             self.assertTrue(
-                subprocess.run(
-                    [executable, "summary", *arguments],
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                ).stdout.strip()
-            )
-            self.assertTrue(
-                subprocess.run(
-                    [
-                        executable,
-                        "digest",
-                        *arguments,
-                        "--session",
-                        "codex-test-001",
-                    ],
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                ).stdout.strip()
+                self.run_cli(
+                    executable,
+                    "digest",
+                    *arguments,
+                    "--session",
+                    "codex-test-001",
+                ).strip()
             )
 
 

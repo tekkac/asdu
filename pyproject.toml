@@ -4,12 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "asdu"
-version = "0.5.0"
+version = "0.5.1"
 description = "A terminal disk-usage browser for local agent sessions"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
-dependencies = ["send2trash>=1.8.3"]
+dependencies = [
+    "send2trash>=1.8.3",
+    "windows-curses>=2.4.2; sys_platform == 'win32'",
+]
 
 [project.urls]
 Homepage = "https://github.com/tekkac/asdu"
