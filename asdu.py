@@ -25,6 +25,16 @@ import asdu_views as view
 __version__ = "0.5.1"
 
 
+def configure_output_encoding() -> None:
+    """Keep Unicode CLI output intact when Windows redirects the streams."""
+    if sys.platform != "win32":
+        return
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8")
+
+
 def default_root(variable: str, directory: str, leaf: str) -> Path:
     home = Path(os.environ.get(variable) or Path.home() / directory)
     return home.expanduser() / leaf
@@ -41,6 +51,7 @@ def default_opencode_db() -> Path:
 
 
 def main() -> int:
+    configure_output_encoding()
     try:
         return run_main()
     except curses.error as error:

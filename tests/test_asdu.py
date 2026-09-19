@@ -916,6 +916,22 @@ class ActionTests(unittest.TestCase):
 
 
 class CliAndReaderTests(unittest.TestCase):
+    def test_windows_output_is_utf8_even_when_redirected(self):
+        stdout = SimpleNamespace(
+            reconfigure=lambda **options: setattr(stdout, "options", options)
+        )
+        stderr = SimpleNamespace(
+            reconfigure=lambda **options: setattr(stderr, "options", options)
+        )
+        with (
+            patch.object(asdu.sys, "platform", "win32"),
+            patch.object(asdu.sys, "stdout", stdout),
+            patch.object(asdu.sys, "stderr", stderr),
+        ):
+            asdu.configure_output_encoding()
+        self.assertEqual(stdout.options, {"encoding": "utf-8"})
+        self.assertEqual(stderr.options, {"encoding": "utf-8"})
+
     def test_windows_curses_is_a_windows_only_dependency(self):
         project = tomllib.loads((SCRIPT.parent / "pyproject.toml").read_text())
         dependencies = project["project"]["dependencies"]
