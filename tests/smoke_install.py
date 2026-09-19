@@ -21,6 +21,17 @@ from asdu_sources import claude, codex, kimi, omp, opencode
 
 
 class InstalledSmoke(unittest.TestCase):
+    def run_cli(self, executable, *arguments):
+        result = subprocess.run(
+            [executable, *arguments], capture_output=True, text=True, check=False
+        )
+        self.assertEqual(
+            result.returncode,
+            0,
+            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}",
+        )
+        return result.stdout
+
     def test_installed_wheel(self):
         source = Path(__file__).resolve().parents[1]
         for module in (asdu, asdu_browser, asdu_sessions, ui, views):
@@ -120,27 +131,15 @@ class InstalledSmoke(unittest.TestCase):
                 str(roots[opencode]),
                 "--no-progress",
             ]
+            self.assertTrue(self.run_cli(executable, "summary", *arguments).strip())
             self.assertTrue(
-                subprocess.run(
-                    [executable, "summary", *arguments],
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                ).stdout.strip()
-            )
-            self.assertTrue(
-                subprocess.run(
-                    [
-                        executable,
-                        "digest",
-                        *arguments,
-                        "--session",
-                        "codex-test-001",
-                    ],
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                ).stdout.strip()
+                self.run_cli(
+                    executable,
+                    "digest",
+                    *arguments,
+                    "--session",
+                    "codex-test-001",
+                ).strip()
             )
 
 
