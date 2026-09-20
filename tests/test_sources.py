@@ -61,7 +61,7 @@ class SourceTests(unittest.TestCase):
                     "kimi",
                     "omp",
                     "opencode",
-                    "antigravity",
+                    "agy",
                 )
             }
             for path in roots.values():
@@ -87,7 +87,7 @@ class SourceTests(unittest.TestCase):
                 patch.object(
                     antigravity,
                     "discover",
-                    return_value=[session("a", source="antigravity")],
+                    return_value=[session("a", source="agy")],
                 ),
             ):
                 adapters = source_adapters(
@@ -96,12 +96,12 @@ class SourceTests(unittest.TestCase):
                     roots["omp"],
                     roots["kimi"],
                     roots["opencode"],
-                    roots["antigravity"],
+                    roots["agy"],
                 )
                 entries = scan(tuple(adapters), adapters, ui.ScanProgress(False))
             self.assertEqual(
                 {entry.source for entry in entries},
-                {"codex", "claude", "kimi", "omp", "opencode", "antigravity"},
+                {"codex", "claude", "kimi", "omp", "opencode", "agy"},
             )
 
     def test_kimi_bundle_maps_main_child_brief_and_exact_storage(self):

@@ -20,7 +20,7 @@ READERS = {
     "kimi": kimi,
     "omp": omp,
     "opencode": opencode,
-    "antigravity": antigravity,
+    "agy": antigravity,
 }
 
 
@@ -57,7 +57,7 @@ def source_adapters(
     if opencode_db is not None:
         roots["opencode"] = opencode_db
     if antigravity_root is not None:
-        roots["antigravity"] = antigravity_root
+        roots["agy"] = antigravity_root
     return {
         name: SourceAdapter(root, READERS[name].discover)
         for name, root in roots.items()

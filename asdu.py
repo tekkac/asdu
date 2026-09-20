@@ -111,7 +111,7 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument(
         "--source",
-        choices=("codex", "claude", "kimi", "omp", "opencode", "antigravity"),
+        choices=("codex", "claude", "kimi", "omp", "opencode", "agy"),
         action="append",
         help="Repeat to select sources; default is all available",
     )

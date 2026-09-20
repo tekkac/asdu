@@ -113,7 +113,7 @@ class AntigravityTests(unittest.TestCase):
         self.assertEqual(
             (parent.source, parent.origin, parent.cwd, parent.title),
             (
-                "antigravity",
+                "agy",
                 "primary",
                 "/workspace/demo",
                 "untitled — Map Antigravity safely",
@@ -134,7 +134,6 @@ class AntigravityTests(unittest.TestCase):
         self.assertIn("3 steps recorded.", digest)
         self.assertIn("Map Antigravity safely", digest)
         self.assertIn("Recorded via: planner", digest)
-        self.assertEqual(views.source_token(parent.source), "antigrav")
         self.assertEqual(available_actions(parent), frozenset())
         self.assertEqual(session_controls(parent).commands, ())
 

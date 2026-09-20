@@ -160,7 +160,7 @@ class InstalledSmoke(unittest.TestCase):
             )
             self.assertEqual(
                 {entry.source for entry in entries},
-                {"codex", "claude", "kimi", "omp", "opencode", "antigravity"},
+                {"codex", "claude", "kimi", "omp", "opencode", "agy"},
             )
             for entry in entries:
                 self.assertIn("fixture inspected", views.digest(entry))

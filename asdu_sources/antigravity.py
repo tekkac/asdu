@@ -226,7 +226,7 @@ def discover(root: Path, progress: ScanReporter) -> list[Session]:
                 path,
                 size,
                 max(file_modified, summary.modified),
-                "antigravity",
+                "agy",
                 "subagent" if parent else "primary",
                 summary.cwd or workspaces.get(identifier, "(unknown)"),
                 identifier,

@@ -11,8 +11,8 @@
             agent session disk usage
 ```
 
-`asdu` shows where Antigravity, Claude, Codex, Kimi, OpenCode, and OMP sessions
-use disk space.
+`asdu` shows where Antigravity (`agy`), Claude, Codex, Kimi, OpenCode, and OMP
+sessions use disk space.
 
 It works like a file browser. Start in a folder, inspect its sessions, and move
 up or down the directory tree. Everything stays local.
