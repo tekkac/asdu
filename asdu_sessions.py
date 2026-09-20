@@ -46,6 +46,7 @@ class BriefData:
     assistant_messages: int = 0
     turns: int = 0
     compactions: int = 0
+    activity_summary: str = ""
 
 
 @dataclass(frozen=True)

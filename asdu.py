@@ -104,8 +104,14 @@ def parser() -> argparse.ArgumentParser:
         help="OpenCode session database",
     )
     result.add_argument(
+        "--antigravity-root",
+        type=Path,
+        default=Path.home() / ".gemini" / "antigravity-cli",
+        help="Antigravity session storage directory (read-only)",
+    )
+    result.add_argument(
         "--source",
-        choices=("codex", "claude", "kimi", "omp", "opencode"),
+        choices=("codex", "claude", "kimi", "omp", "opencode", "agy"),
         action="append",
         help="Repeat to select sources; default is all available",
     )
@@ -163,6 +169,7 @@ def run_main() -> int:
         args.omp_root,
         args.kimi_root,
         args.opencode_db,
+        args.antigravity_root,
     )
     sources = tuple(dict.fromkeys(args.source or adapters))
     source_roots = {
