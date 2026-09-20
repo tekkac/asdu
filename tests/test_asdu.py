@@ -1017,7 +1017,7 @@ class CliAndReaderTests(unittest.TestCase):
             self.assertEqual(asdu.run_main(), 0)
         self.assertEqual(
             scan.call_args.args[0],
-            ("codex", "claude", "omp", "kimi", "opencode"),
+            ("codex", "claude", "omp", "kimi", "opencode", "antigravity"),
         )
         self.assertEqual(tui.call_args.args[1], "cwd")
         self.assertEqual(tui.call_args.args[3], Path.cwd().resolve())

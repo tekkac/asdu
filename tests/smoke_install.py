@@ -17,7 +17,7 @@ import asdu_browser
 import asdu_sessions
 import asdu_tui as ui
 import asdu_views as views
-from asdu_sources import claude, codex, kimi, omp, opencode
+from asdu_sources import antigravity, claude, codex, kimi, omp, opencode
 
 
 class InstalledSmoke(unittest.TestCase):
@@ -111,9 +111,56 @@ class InstalledSmoke(unittest.TestCase):
                 )
             roots[opencode] = opencode_db
             entries.extend(opencode.discover(opencode_db, ui.ScanProgress(False)))
+
+            antigravity_root = root / "antigravity"
+            antigravity_conversations = antigravity_root / "conversations"
+            antigravity_conversations.mkdir(parents=True)
+            antigravity_id = "33333333-3333-4333-8333-333333333333"
+            antigravity_db = antigravity_conversations / f"{antigravity_id}.db"
+            with closing(sqlite3.connect(antigravity_db)) as database, database:
+                database.executescript(
+                    """
+                    CREATE TABLE trajectory_meta (
+                      trajectory_id TEXT PRIMARY KEY, cascade_id TEXT
+                    );
+                    CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_payload BLOB);
+                    INSERT INTO trajectory_meta VALUES ('fixture', 'fixture');
+                    INSERT INTO steps VALUES (0, X'00');
+                    """
+                )
+            with closing(
+                sqlite3.connect(antigravity_root / "conversation_summaries.db")
+            ) as database, database:
+                database.executescript(
+                    """
+                    CREATE TABLE conversation_summaries (
+                      conversation_id TEXT PRIMARY KEY, title TEXT, preview TEXT,
+                      step_count INTEGER, last_modified_time TEXT,
+                      workspace_uris TEXT, parent_conversation_id TEXT,
+                      agent_name TEXT
+                    );
+                    """
+                )
+                database.execute(
+                    "INSERT INTO conversation_summaries VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        antigravity_id,
+                        "Antigravity fixture",
+                        "fixture inspected",
+                        1,
+                        "2026-09-19T12:00:00+00:00",
+                        json.dumps(["file:///workspace/demo"]),
+                        "",
+                        "",
+                    ),
+                )
+            roots[antigravity] = antigravity_root
+            entries.extend(
+                antigravity.discover(antigravity_root, ui.ScanProgress(False))
+            )
             self.assertEqual(
                 {entry.source for entry in entries},
-                {"codex", "claude", "kimi", "omp", "opencode"},
+                {"codex", "claude", "kimi", "omp", "opencode", "antigravity"},
             )
             for entry in entries:
                 self.assertIn("fixture inspected", views.digest(entry))
@@ -129,6 +176,8 @@ class InstalledSmoke(unittest.TestCase):
                 str(roots[kimi]),
                 "--opencode-db",
                 str(roots[opencode]),
+                "--antigravity-root",
+                str(roots[antigravity]),
                 "--no-progress",
             ]
             self.assertTrue(self.run_cli(executable, "summary", *arguments).strip())

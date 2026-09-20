@@ -13,6 +13,7 @@ from test_asdu import FIXTURES, browser, session
 import asdu_tui as ui
 import asdu_views as views
 from asdu_sources import (
+    antigravity,
     claude,
     codex,
     kimi,
@@ -54,7 +55,14 @@ class SourceTests(unittest.TestCase):
             root = Path(directory)
             roots = {
                 name: root / name
-                for name in ("codex", "claude", "kimi", "omp", "opencode")
+                for name in (
+                    "codex",
+                    "claude",
+                    "kimi",
+                    "omp",
+                    "opencode",
+                    "antigravity",
+                )
             }
             for path in roots.values():
                 path.mkdir()
@@ -76,6 +84,11 @@ class SourceTests(unittest.TestCase):
                     "discover",
                     return_value=[session("p", source="opencode")],
                 ),
+                patch.object(
+                    antigravity,
+                    "discover",
+                    return_value=[session("a", source="antigravity")],
+                ),
             ):
                 adapters = source_adapters(
                     roots["codex"],
@@ -83,11 +96,12 @@ class SourceTests(unittest.TestCase):
                     roots["omp"],
                     roots["kimi"],
                     roots["opencode"],
+                    roots["antigravity"],
                 )
                 entries = scan(tuple(adapters), adapters, ui.ScanProgress(False))
             self.assertEqual(
                 {entry.source for entry in entries},
-                {"codex", "claude", "kimi", "omp", "opencode"},
+                {"codex", "claude", "kimi", "omp", "opencode", "antigravity"},
             )
 
     def test_kimi_bundle_maps_main_child_brief_and_exact_storage(self):

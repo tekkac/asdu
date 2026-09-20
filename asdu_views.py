@@ -303,7 +303,8 @@ def read_digest(
         f"Folder: {session.cwd}",
         "Counting activity…"
         if preview
-        else f"{activity} across {events:,} events; {compactions:,} compactions.",
+        else data.activity_summary
+        or f"{activity} across {events:,} events; {compactions:,} compactions.",
         "",
         f"╭ Latest request{sample}",
         excerpt(data.latest_user),
@@ -393,11 +394,16 @@ def source_color(source: str) -> int:
         "omp": 10,
         "kimi": 11,
         "opencode": 4,
+        "antigravity": 12,
     }.get(source, 0)
 
 
 def source_name(source: str) -> str:
     return {"omp": "OMP", "opencode": "OpenCode"}.get(source, source.title())
+
+
+def source_token(source: str) -> str:
+    return {"antigravity": "antigrav"}.get(source, source)
 
 
 def session_type_label(session: Session) -> str:
@@ -437,7 +443,7 @@ def draw_session_line(
     prefix = (
         f"  {session_size(size, session.size_is_logical):>{SIZE_COLUMN_WIDTH}}  {bar}"
     )
-    source = f"{session.source:<{SOURCE_COLUMN_WIDTH}}  "
+    source = f"{source_token(session.source):<{SOURCE_COLUMN_WIDTH}}  "
     kind = f"{session_type_label(session):<{TYPE_COLUMN_WIDTH}}  "
     date = f"{session_date(session):>{DATE_COLUMN_WIDTH}}  "
     folder_text = f"{compact_path(folder, 24):<24}  " if folder else ""
