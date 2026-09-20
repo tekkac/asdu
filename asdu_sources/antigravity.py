@@ -19,6 +19,9 @@ from asdu_sessions import (
     Session,
     SessionCommand,
     SessionControls,
+    open_transcript,
+    preview_transcript,
+    substantive_user_text,
     untitled_title,
 )
 
@@ -37,6 +40,7 @@ SUMMARY_COLUMNS = {
     "agent_name",
 }
 CONVERSATION_TABLES = {"steps", "trajectory_meta"}
+USER_REQUEST = re.compile(r"<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>", re.DOTALL)
 
 
 @dataclass(frozen=True)
@@ -105,6 +109,12 @@ def workspace_path(value: object) -> str:
             path = path[1:]
         return path
     return ""
+
+
+def explicit_user_text(content: str) -> str:
+    if match := USER_REQUEST.search(content):
+        content = match.group(1)
+    return substantive_user_text(" ".join(content.split()))
 
 
 def read_summaries(path: Path) -> dict[str, Summary]:
@@ -249,7 +259,6 @@ def discover(root: Path, progress: ScanReporter) -> list[Session]:
 
 
 def load_brief(session: Session, poll=None, preview: bool = False) -> BriefData:
-    del poll, preview
     try:
         summaries = read_summaries(
             Path(session.source_home) / "conversation_summaries.db"
@@ -263,7 +272,7 @@ def load_brief(session: Session, poll=None, preview: bool = False) -> BriefData:
                 )
     except (OSError, sqlite3.Error) as error:
         raise OSError(f"could not read Antigravity session: {error}") from error
-    return BriefData(
+    data = BriefData(
         None,
         None,
         None,
@@ -272,8 +281,68 @@ def load_brief(session: Session, poll=None, preview: bool = False) -> BriefData:
         [summary.agent_name] if summary.agent_name else [],
         session.task_path,
         session.forked_from,
-        activity_summary=f"{steps:,} steps recorded.",
     )
+    transcript = (
+        Path(session.source_home)
+        / "brain"
+        / session.session_id
+        / ".system_generated"
+        / "logs"
+        / "transcript.jsonl"
+    )
+    if not transcript.is_file():
+        transcript = transcript.with_name("transcript_full.jsonl")
+    if transcript.is_file():
+        try:
+            stream = (
+                preview_transcript(transcript)
+                if preview
+                else open_transcript(transcript, "rt")
+            )
+            with stream:
+                for index, line in enumerate(stream):
+                    if poll is not None and index % 128 == 0:
+                        poll()
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(record, dict):
+                        continue
+                    content = record.get("content")
+                    if not isinstance(content, str):
+                        continue
+                    text = " ".join(content.split())
+                    source = record.get("source")
+                    kind = record.get("type")
+                    if source == "USER_EXPLICIT" and kind == "USER_INPUT":
+                        text = explicit_user_text(content)
+                        if text:
+                            data.first_user = data.first_user or text
+                            data.latest_user = text
+                            data.user_messages += 1
+                    elif source == "MODEL" and kind in {
+                        "GENERIC",
+                        "PLANNER_RESPONSE",
+                    }:
+                        if text:
+                            data.latest_reply = text
+                            data.assistant_messages += 1
+        except OSError as error:
+            raise OSError(f"could not read Antigravity transcript: {error}") from error
+    if data.first_user:
+        data.first_objective = None
+    data.turns = data.user_messages
+    if data.user_messages or data.assistant_messages:
+        requests = "request" if data.user_messages == 1 else "requests"
+        replies = "reply" if data.assistant_messages == 1 else "replies"
+        data.activity_summary = (
+            f"{steps:,} steps; {data.user_messages:,} {requests}, "
+            f"{data.assistant_messages:,} {replies}."
+        )
+    else:
+        data.activity_summary = f"{steps:,} steps recorded."
+    return data
 
 
 def session_controls(session: Session) -> SessionControls:

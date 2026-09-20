@@ -44,8 +44,45 @@ def create_store(root: Path) -> None:
     create_conversation(conversations / f"{PARENT_ID}.db", 3)
     create_conversation(conversations / f"{CHILD_ID}.db", 1)
     brain = root / "brain" / PARENT_ID
-    brain.mkdir(parents=True)
+    logs = brain / ".system_generated" / "logs"
+    logs.mkdir(parents=True)
     (brain / "artifact.txt").write_text("owned artifact", encoding="utf-8")
+    transcript = (
+        {
+            "step_index": 0,
+            "source": "USER_EXPLICIT",
+            "type": "USER_INPUT",
+            "status": "DONE",
+            "content": "First fictional request",
+        },
+        {
+            "step_index": 1,
+            "source": "MODEL",
+            "type": "GENERIC",
+            "status": "DONE",
+            "content": "First fictional reply",
+        },
+        {
+            "step_index": 2,
+            "source": "USER_EXPLICIT",
+            "type": "USER_INPUT",
+            "status": "DONE",
+            "content": (
+                "<USER_REQUEST>\nLatest fictional request\n</USER_REQUEST>\n"
+                "<ADDITIONAL_METADATA>fixture metadata</ADDITIONAL_METADATA>"
+            ),
+        },
+        {
+            "step_index": 3,
+            "source": "MODEL",
+            "type": "GENERIC",
+            "status": "DONE",
+            "content": "Latest fictional reply",
+        },
+    )
+    (logs / "transcript.jsonl").write_text(
+        "".join(json.dumps(item) + "\n" for item in transcript), encoding="utf-8"
+    )
     cache = root / "cache"
     cache.mkdir()
     (cache / "last_conversations.json").write_text(
@@ -73,7 +110,7 @@ def create_store(root: Path) -> None:
                     PARENT_ID,
                     "",
                     "Map Antigravity safely",
-                    3,
+                    4,
                     "2026-09-19T12:00:00+00:00",
                     json.dumps(["file:///workspace/demo"]),
                     "",
@@ -107,9 +144,14 @@ class AntigravityTests(unittest.TestCase):
             by_id = {entry.session_id: entry for entry in entries}
             parent, child = by_id[PARENT_ID], by_id[CHILD_ID]
             expected = parent_db.stat().st_size + sidecar.stat().st_size
-            expected += (root / "brain" / PARENT_ID / "artifact.txt").stat().st_size
+            expected += sum(
+                path.stat().st_size
+                for path in (root / "brain" / PARENT_ID).rglob("*")
+                if path.is_file()
+            )
             sidecar_mtime = sidecar.stat().st_mtime
             digest = views.digest(parent)
+            preview = views.digest(parent, preview=True)
 
         self.assertEqual(
             (parent.source, parent.origin, parent.cwd, parent.title),
@@ -132,8 +174,12 @@ class AntigravityTests(unittest.TestCase):
                 "Inspect the fictional child",
             ),
         )
-        self.assertIn("3 steps recorded.", digest)
-        self.assertIn("Map Antigravity safely", digest)
+        self.assertIn("4 steps; 2 requests, 2 replies.", digest)
+        self.assertIn("First fictional request", digest)
+        self.assertIn("Latest fictional request", digest)
+        self.assertIn("Latest fictional reply", digest)
+        self.assertIn("Latest fictional request", preview)
+        self.assertIn("Latest fictional reply", preview)
         self.assertIn("Recorded via: planner", digest)
         self.assertEqual(available_actions(parent), frozenset())
         self.assertEqual(
