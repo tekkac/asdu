@@ -6,6 +6,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,7 +20,7 @@ from asdu_sources import opencode, session_controls
 
 
 def create_database(path: Path) -> None:
-    with sqlite3.connect(path) as database:
+    with closing(sqlite3.connect(path)) as database, database:
         database.executescript(
             """
             PRAGMA foreign_keys = ON;
@@ -212,7 +213,7 @@ class OpenCodeTests(unittest.TestCase):
             )
 
             def delete_tree(*_args, **_kwargs):
-                with sqlite3.connect(path) as database:
+                with closing(sqlite3.connect(path)) as database, database:
                     database.execute("PRAGMA foreign_keys = ON")
                     database.execute(
                         "DELETE FROM session WHERE id IN ('ses_child456', 'ses_parent123')"
@@ -266,7 +267,7 @@ class OpenCodeTests(unittest.TestCase):
                 opencode.prepare_actions([replace(parent, modified=9)], "delete")
 
             unsupported = root / "unsupported.db"
-            with sqlite3.connect(unsupported) as database:
+            with closing(sqlite3.connect(unsupported)) as database, database:
                 database.execute("CREATE TABLE session (id TEXT PRIMARY KEY)")
             progress = ui.ScanProgress(False)
             self.assertEqual(opencode.discover(unsupported, progress), [])

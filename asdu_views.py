@@ -18,7 +18,7 @@ from asdu_browser import (
     row_id,
     subtree_stats,
 )
-from asdu_sessions import Session, SessionControls, session_label
+from asdu_sessions import Session, SessionControls, session_label, short_home_path
 from asdu_sources import action_scope, available_actions, read_brief, session_controls
 
 ASCII_UI = False
@@ -541,10 +541,7 @@ def action_dialog(window, title, body, options, default, shortcuts, labels=None)
 
 
 def short_path(path: str) -> str:
-    home = str(Path.home())
-    return (
-        "~" + path[len(home) :] if path == home or path.startswith(home + "/") else path
-    )
+    return short_home_path(path)
 
 
 def confirm_session_action(

@@ -26,6 +26,9 @@ uv tool install asdu
 asdu
 ```
 
+On Windows, use CPython 3.11–3.14 in Windows Terminal. The required curses
+compatibility package is installed automatically. WSL continues to work normally.
+
 Update an existing installation:
 
 ```sh
