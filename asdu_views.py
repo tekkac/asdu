@@ -513,14 +513,26 @@ def action_dialog(window, title, body, options, default, shortcuts, labels=None)
                 else compact_text(line, box_width)
             )
             if boxed:
-                text = terminal_art("│" + text + "│")
-            window.addnstr(
-                row,
-                left,
-                text,
-                box_width,
-                curses.A_REVERSE if active else curses.A_NORMAL,
-            )
+                border = terminal_art("│")
+                window.addnstr(row, left, border, 1, curses.A_NORMAL)
+                window.addnstr(
+                    row,
+                    left + 1,
+                    text,
+                    inner,
+                    curses.A_REVERSE if active else curses.A_NORMAL,
+                )
+                window.addnstr(
+                    row, left + box_width - 1, border, 1, curses.A_NORMAL
+                )
+            else:
+                window.addnstr(
+                    row,
+                    left,
+                    text,
+                    box_width,
+                    curses.A_REVERSE if active else curses.A_NORMAL,
+                )
         if boxed:
             window.addnstr(top, left, terminal_art("╭" + "─" * inner + "╮"), box_width)
             window.addnstr(
@@ -664,6 +676,9 @@ def confirm_session_action(
 
 def confirm_action(window, title: str, question: str, count: int) -> bool:
     target = "this session" if count == 1 else f"these {count} sessions"
+    # The confirmation is smaller than the action chooser it follows. Clear the
+    # old box so its border and options do not remain visible around this one.
+    window.erase()
     return (
         action_dialog(
             window,

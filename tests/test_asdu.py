@@ -668,6 +668,22 @@ class ActionTests(unittest.TestCase):
         self.assertIn("D  Delete tree", text)
         self.assertIn("30 B", text)
 
+    def test_confirmation_replaces_action_dialog_without_highlighting_borders(self):
+        root = session("root")
+        screen = Screen([ord("d"), ord("n")], width=120)
+
+        self.assertEqual(views.confirm_session_action(screen, root), "delete")
+        self.assertFalse(views.confirm_permanent_delete(screen))
+
+        confirmation = screen.frames[-1]
+        text = " ".join(item[2] for item in confirmation)
+        self.assertNotIn("Session action", text)
+        self.assertNotIn("native Codex delete", text)
+        selected = [item for item in confirmation if item[3] & views.curses.A_REVERSE]
+        self.assertTrue(selected)
+        self.assertTrue(all(not item[2].startswith("│") for item in selected))
+        self.assertTrue(all(not item[2].endswith("│") for item in selected))
+
     def test_tree_action_applies_descendants_first(self):
         root, child = session("root"), session("child", "root")
         seen = []
