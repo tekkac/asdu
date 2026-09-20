@@ -22,7 +22,7 @@ import asdu_sources as sources_api
 import asdu_tui as ui
 import asdu_views as view
 
-__version__ = "0.5.1"
+__version__ = "0.6.0"
 
 
 def configure_output_encoding() -> None:
