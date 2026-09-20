@@ -13,7 +13,14 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from asdu_sessions import BriefData, ScanReporter, Session, untitled_title
+from asdu_sessions import (
+    BriefData,
+    ScanReporter,
+    Session,
+    SessionCommand,
+    SessionControls,
+    untitled_title,
+)
 
 CONVERSATION_ID = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
@@ -266,4 +273,12 @@ def load_brief(session: Session, poll=None, preview: bool = False) -> BriefData:
         session.task_path,
         session.forked_from,
         activity_summary=f"{steps:,} steps recorded.",
+    )
+
+
+def session_controls(session: Session) -> SessionControls:
+    if not CONVERSATION_ID.fullmatch(session.session_id):
+        return SessionControls()
+    return SessionControls(
+        (SessionCommand("Resume", ("agy", "--conversation", session.session_id)),)
     )

@@ -8,6 +8,7 @@ import sqlite3
 import tempfile
 import unittest
 from contextlib import closing
+from dataclasses import replace
 from pathlib import Path
 
 import asdu_tui as ui
@@ -135,7 +136,13 @@ class AntigravityTests(unittest.TestCase):
         self.assertIn("Map Antigravity safely", digest)
         self.assertIn("Recorded via: planner", digest)
         self.assertEqual(available_actions(parent), frozenset())
-        self.assertEqual(session_controls(parent).commands, ())
+        self.assertEqual(
+            session_controls(parent).commands[0].argv,
+            ("agy", "--conversation", PARENT_ID),
+        )
+        self.assertEqual(
+            session_controls(replace(parent, session_id="--help")).commands, ()
+        )
 
     def test_skips_malformed_conversation_database(self):
         with tempfile.TemporaryDirectory() as directory:
