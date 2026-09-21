@@ -18,6 +18,7 @@ from asdu_sessions import (
     SessionControls,
     content_text,
     open_transcript,
+    path_tree_size,
     preview_transcript,
     substantive_user_text,
     untitled_title,
@@ -146,25 +147,6 @@ def load_conversation(path: Path, preview: bool = False) -> Conversation | None:
         return None
 
 
-def path_size(path: Path) -> int:
-    try:
-        if path.is_symlink() or path.is_file():
-            return path.lstat().st_size
-    except OSError:
-        return 0
-    total = 0
-    try:
-        for item in path.rglob("*"):
-            try:
-                if item.is_symlink() or item.is_file():
-                    total += item.lstat().st_size
-            except OSError:
-                continue
-    except OSError:
-        pass
-    return total
-
-
 def safe_id(identifier: str) -> str:
     return re.sub(r"[^A-Za-z0-9_-]", "_", identifier)
 
@@ -233,7 +215,7 @@ def conversation_title(conversation: Conversation) -> str:
 def owned_artifact_size(directory: Path, identifier: str) -> int:
     safe = safe_id(identifier)
     return sum(
-        path_size(path)
+        path_tree_size(path)
         for path in (
             directory / "logs" / f"session-{safe}.jsonl",
             directory / "tool-outputs" / f"session-{safe}",
@@ -247,7 +229,7 @@ def discover(root: Path, progress: ScanReporter) -> list[Session]:
     files = sorted(temp.glob("*/chats/**/*.json")) + sorted(
         temp.glob("*/chats/**/*.jsonl")
     )
-    sizes = [path_size(path) for path in files]
+    sizes = [path_tree_size(path) for path in files]
     total = sum(sizes)
     paths = project_paths(root)
     grouped: dict[str, list[tuple[Path, Conversation, int]]] = {}

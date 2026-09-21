@@ -17,6 +17,7 @@ from asdu_sessions import (
     SessionControls,
     content_text,
     iter_jsonl,
+    path_tree_size,
     read_jsonl_brief,
     substantive_user_text,
     untitled_title,
@@ -108,27 +109,6 @@ def session_controls(session: Session) -> SessionControls:
         )
     )
     return SessionControls(tuple(commands))
-
-
-def path_size(path: Path) -> int:
-    """Count each owned filesystem entry once without following symlinks."""
-    try:
-        if path.is_symlink() or path.is_file():
-            return path.lstat().st_size
-    except OSError:
-        return 0
-    total = 0
-    try:
-        items = path.rglob("*")
-        for item in items:
-            try:
-                if item.is_symlink() or item.is_file():
-                    total += item.lstat().st_size
-            except OSError:
-                continue
-    except OSError:
-        pass
-    return total
 
 
 def prompt_texts(item: dict, origin_kind: str):
@@ -267,7 +247,7 @@ def inspect_bundle(
         wire = agent_dir / "wire.jsonl"
         if not wire.is_file():
             continue
-        size = path_size(agent_dir)
+        size = path_tree_size(agent_dir)
         child_bytes += size
         parent_agent = safe_agent_id(metadata.get("parentAgentId"))
         forked_agent = safe_agent_id(metadata.get("forkedFrom"))
@@ -300,7 +280,7 @@ def inspect_bundle(
                 source_home=str(bundle.parents[2]),
             )
         )
-    total = path_size(bundle) if bundle_size is None else bundle_size
+    total = path_tree_size(bundle) if bundle_size is None else bundle_size
     title = state.get("title")
     title = title.strip() if isinstance(title, str) else ""
     if not title:
@@ -330,7 +310,7 @@ def inspect_bundle(
 
 def discover(root: Path, progress: ScanReporter) -> list[Session]:
     state_paths = sorted(root.glob("*/*/state.json"))
-    sizes = [path_size(path.parent) for path in state_paths]
+    sizes = [path_tree_size(path.parent) for path in state_paths]
     total_bytes = sum(sizes)
     done_bytes = 0
     sessions: list[Session] = []
