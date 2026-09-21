@@ -43,29 +43,8 @@ class SourceAdapter:
     scan: Callable[..., list[Session]]
 
 
-def source_adapters(
-    codex_root: Path,
-    claude_root: Path,
-    omp_root: Path | None = None,
-    kimi_root: Path | None = None,
-    opencode_db: Path | None = None,
-    antigravity_root: Path | None = None,
-    hermes_db: Path | None = None,
-    gemini_root: Path | None = None,
-) -> dict[str, SourceAdapter]:
-    roots = {"codex": codex_root, "claude": claude_root}
-    if omp_root is not None:
-        roots["omp"] = omp_root
-    if kimi_root is not None:
-        roots["kimi"] = kimi_root
-    if opencode_db is not None:
-        roots["opencode"] = opencode_db
-    if antigravity_root is not None:
-        roots["agy"] = antigravity_root
-    if hermes_db is not None:
-        roots["hermes"] = hermes_db
-    if gemini_root is not None:
-        roots["gemini"] = gemini_root
+def source_adapters(roots: dict[str, Path]) -> dict[str, SourceAdapter]:
+    """Bind configured storage locations to their native readers."""
     return {
         name: SourceAdapter(root, READERS[name].discover)
         for name, root in roots.items()

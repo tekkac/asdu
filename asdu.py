@@ -214,14 +214,16 @@ def run_main() -> int:
         )
 
     adapters = sources_api.source_adapters(
-        args.codex_root,
-        args.claude_root,
-        args.omp_root,
-        args.kimi_root,
-        args.opencode_db,
-        args.antigravity_root,
-        args.hermes_db,
-        args.gemini_root,
+        {
+            "codex": args.codex_root,
+            "claude": args.claude_root,
+            "omp": args.omp_root,
+            "kimi": args.kimi_root,
+            "opencode": args.opencode_db,
+            "agy": args.antigravity_root,
+            "hermes": args.hermes_db,
+            "gemini": args.gemini_root,
+        }
     )
     sources = tuple(dict.fromkeys(args.source or adapters))
     source_roots = {

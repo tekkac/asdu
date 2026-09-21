@@ -162,6 +162,26 @@ def open_transcript(path: Path, mode: str):
     )
 
 
+def path_tree_size(path: Path) -> int:
+    """Count file bytes below a path once, without following symlinks."""
+    try:
+        if path.is_symlink() or path.is_file():
+            return path.lstat().st_size
+    except OSError:
+        return 0
+    total = 0
+    try:
+        for item in path.rglob("*"):
+            try:
+                if item.is_symlink() or item.is_file():
+                    total += item.lstat().st_size
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return total
+
+
 def content_text(content: object) -> str:
     if isinstance(content, str):
         return content

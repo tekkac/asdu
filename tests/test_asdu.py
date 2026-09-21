@@ -1115,6 +1115,18 @@ class CliAndReaderTests(unittest.TestCase):
         )
         self.assertEqual(progress.skipped, {missing})
 
+    def test_path_tree_size_counts_nested_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "first.jsonl"
+            second = root / "nested" / "second.jsonl"
+            second.parent.mkdir()
+            first.write_bytes(b"123")
+            second.write_bytes(b"4567")
+            self.assertEqual(transcripts.path_tree_size(root), 7)
+            self.assertEqual(transcripts.path_tree_size(first), 3)
+            self.assertEqual(transcripts.path_tree_size(root / "missing"), 0)
+
     def test_jsonl_reader_tolerates_malformed_records(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "records.jsonl"

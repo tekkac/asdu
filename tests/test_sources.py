@@ -104,16 +104,7 @@ class SourceTests(unittest.TestCase):
                     return_value=[session("g", source="gemini")],
                 ),
             ):
-                adapters = source_adapters(
-                    roots["codex"],
-                    roots["claude"],
-                    roots["omp"],
-                    roots["kimi"],
-                    roots["opencode"],
-                    roots["agy"],
-                    roots["hermes"],
-                    roots["gemini"],
-                )
+                adapters = source_adapters(roots)
                 entries = scan(tuple(adapters), adapters, ui.ScanProgress(False))
             self.assertEqual(
                 {entry.source for entry in entries},
