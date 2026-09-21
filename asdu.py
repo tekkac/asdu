@@ -23,6 +23,7 @@ import asdu_tui as ui
 import asdu_views as view
 
 __version__ = "0.7.0"
+COMMANDS = ("browse", "summary", "digest")
 
 
 def configure_output_encoding() -> None:
@@ -75,14 +76,23 @@ def main() -> int:
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
-        description="ncdu-style browser for local agent session storage."
+        description="ncdu-style browser for local agent session storage.",
+        usage="asdu [options] [PATH] | asdu [options] COMMAND [PATH]",
+        epilog="COMMAND is browse, summary, or digest. Browsing is the default.",
     )
     result.add_argument("--version", action="version", version=f"asdu {__version__}")
     result.add_argument(
-        "command",
+        "command_or_path",
         nargs="?",
-        choices=("browse", "summary", "digest"),
-        default="browse",
+        metavar="COMMAND|PATH",
+        help="command to run, or directory to browse",
+    )
+    result.add_argument(
+        "path",
+        nargs="?",
+        type=Path,
+        metavar="PATH",
+        help="directory used by an explicit command",
     )
     result.add_argument(
         "--codex-root",
@@ -148,11 +158,6 @@ def parser() -> argparse.ArgumentParser:
         help="Repeat to select sources; default is all available",
     )
     result.add_argument(
-        "--project",
-        type=Path,
-        help="Start in this directory instead of the current directory",
-    )
-    result.add_argument(
         "--group",
         choices=("folder", "source", "all"),
         default="folder",
@@ -180,9 +185,22 @@ def parser() -> argparse.ArgumentParser:
     return result
 
 
+def invocation(
+    argument_parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> tuple[str, Path | None]:
+    """Interpret the first positional as a command only when it is reserved."""
+    if args.command_or_path in COMMANDS:
+        return args.command_or_path, args.path
+    if args.path is not None:
+        argument_parser.error("PATH may follow only an explicit command")
+    path = Path(args.command_or_path) if args.command_or_path else None
+    return "browse", path
+
+
 def run_main() -> int:
     argument_parser = parser()
     args = argument_parser.parse_args()
+    args.command, start_path = invocation(argument_parser, args)
     view.ASCII_UI = args.ascii
     args.group = {"folder": "cwd"}.get(args.group, args.group)
     args.sort = {"updated": "date"}.get(args.sort, args.sort)
@@ -220,7 +238,7 @@ def run_main() -> int:
         argument_parser.error(
             "no supported session roots found; pass a --*-root option"
         )
-    start = (args.project or Path.cwd()).resolve()
+    start = (start_path or Path.cwd()).resolve()
 
     def scan_current(
         render: Callable[[str, int, int, int, int, str], None] | None = None,
