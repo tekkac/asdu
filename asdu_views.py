@@ -391,6 +391,7 @@ def source_color(source: str) -> int:
     return {
         "codex": 7,
         "claude": 8,
+        "hermes": 5,
         "omp": 10,
         "kimi": 11,
         "opencode": 4,

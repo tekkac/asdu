@@ -11,8 +11,8 @@
             agent session disk usage
 ```
 
-`asdu` shows where Antigravity (`agy`), Claude, Codex, Kimi, OpenCode, and OMP
-sessions use disk space.
+`asdu` shows where Antigravity (`agy`), Claude, Codex, Hermes, Kimi, OpenCode,
+and OMP sessions use disk space.
 
 It works like a file browser. Start in a folder, inspect its sessions, and move
 up or down the directory tree. Everything stays local.
@@ -116,12 +116,12 @@ sessions can move to the system Trash. OpenCode delete is permanent and includes
 the selected session's descendants. Tree actions include folded descendants.
 Active Claude sessions are refused.
 
-OpenCode stores sessions together in SQLite. Its `~` sizes rank logical session
-content; deleting one may not immediately shrink the database file. Kimi can
-export a verified session ZIP to the current directory; it does not provide a
-CLI storage action. Antigravity and OMP have no actions. Antigravity sizes include
-each conversation database and its matching `brain/` artifacts once. Native child
-agents appear as trees.
+OpenCode and Hermes store sessions together in SQLite. Their `~` sizes rank
+logical session content; deleting one may not immediately shrink the database
+file. Kimi can export a verified session ZIP to the current directory; it does
+not provide a CLI storage action. Antigravity, Hermes, and OMP have no storage
+actions. Antigravity sizes include each conversation database and its matching
+`brain/` artifacts once. Native child agents appear as trees.
 
 Successful actions append a content-free record to
 `$XDG_STATE_HOME/asdu/actions.jsonl`, normally

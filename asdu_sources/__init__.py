@@ -12,11 +12,12 @@ from asdu_sessions import (
     SessionControls,
 )
 
-from . import antigravity, claude, codex, kimi, omp, opencode
+from . import antigravity, claude, codex, hermes, kimi, omp, opencode
 
 READERS = {
     "codex": codex,
     "claude": claude,
+    "hermes": hermes,
     "kimi": kimi,
     "omp": omp,
     "opencode": opencode,
@@ -48,6 +49,7 @@ def source_adapters(
     kimi_root: Path | None = None,
     opencode_db: Path | None = None,
     antigravity_root: Path | None = None,
+    hermes_db: Path | None = None,
 ) -> dict[str, SourceAdapter]:
     roots = {"codex": codex_root, "claude": claude_root}
     if omp_root is not None:
@@ -58,6 +60,8 @@ def source_adapters(
         roots["opencode"] = opencode_db
     if antigravity_root is not None:
         roots["agy"] = antigravity_root
+    if hermes_db is not None:
+        roots["hermes"] = hermes_db
     return {
         name: SourceAdapter(root, READERS[name].discover)
         for name, root in roots.items()
