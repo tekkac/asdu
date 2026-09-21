@@ -16,6 +16,7 @@ from asdu_sources import (
     antigravity,
     claude,
     codex,
+    hermes,
     kimi,
     omp,
     opencode,
@@ -62,6 +63,7 @@ class SourceTests(unittest.TestCase):
                     "omp",
                     "opencode",
                     "agy",
+                    "hermes",
                 )
             }
             for path in roots.values():
@@ -89,6 +91,11 @@ class SourceTests(unittest.TestCase):
                     "discover",
                     return_value=[session("a", source="agy")],
                 ),
+                patch.object(
+                    hermes,
+                    "discover",
+                    return_value=[session("h", source="hermes")],
+                ),
             ):
                 adapters = source_adapters(
                     roots["codex"],
@@ -97,11 +104,12 @@ class SourceTests(unittest.TestCase):
                     roots["kimi"],
                     roots["opencode"],
                     roots["agy"],
+                    roots["hermes"],
                 )
                 entries = scan(tuple(adapters), adapters, ui.ScanProgress(False))
             self.assertEqual(
                 {entry.source for entry in entries},
-                {"codex", "claude", "kimi", "omp", "opencode", "agy"},
+                {"codex", "claude", "hermes", "kimi", "omp", "opencode", "agy"},
             )
 
     def test_kimi_bundle_maps_main_child_brief_and_exact_storage(self):

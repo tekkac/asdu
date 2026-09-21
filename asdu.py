@@ -50,6 +50,17 @@ def default_opencode_db() -> Path:
     return data_home.expanduser() / "opencode" / "opencode.db"
 
 
+def default_hermes_db() -> Path:
+    if configured := os.environ.get("HERMES_HOME"):
+        return Path(configured).expanduser() / "state.db"
+    if sys.platform == "win32":
+        data_home = Path(
+            os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local"
+        )
+        return data_home.expanduser() / "hermes" / "state.db"
+    return Path.home() / ".hermes" / "state.db"
+
+
 def main() -> int:
     configure_output_encoding()
     try:
@@ -110,8 +121,14 @@ def parser() -> argparse.ArgumentParser:
         help="Antigravity session storage directory (read-only)",
     )
     result.add_argument(
+        "--hermes-db",
+        type=Path,
+        default=default_hermes_db(),
+        help="Hermes session database (read-only)",
+    )
+    result.add_argument(
         "--source",
-        choices=("codex", "claude", "kimi", "omp", "opencode", "agy"),
+        choices=("codex", "claude", "hermes", "kimi", "omp", "opencode", "agy"),
         action="append",
         help="Repeat to select sources; default is all available",
     )
@@ -170,6 +187,7 @@ def run_main() -> int:
         args.kimi_root,
         args.opencode_db,
         args.antigravity_root,
+        args.hermes_db,
     )
     sources = tuple(dict.fromkeys(args.source or adapters))
     source_roots = {

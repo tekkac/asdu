@@ -17,7 +17,7 @@ import asdu_browser
 import asdu_sessions
 import asdu_tui as ui
 import asdu_views as views
-from asdu_sources import antigravity, claude, codex, kimi, omp, opencode
+from asdu_sources import antigravity, claude, codex, hermes, kimi, omp, opencode
 
 
 class InstalledSmoke(unittest.TestCase):
@@ -112,6 +112,39 @@ class InstalledSmoke(unittest.TestCase):
             roots[opencode] = opencode_db
             entries.extend(opencode.discover(opencode_db, ui.ScanProgress(False)))
 
+            hermes_db = root / "state.db"
+            with closing(sqlite3.connect(hermes_db)) as database, database:
+                database.executescript(
+                    """
+                    CREATE TABLE sessions (
+                      id TEXT PRIMARY KEY, source TEXT NOT NULL, model TEXT,
+                      model_config TEXT, parent_session_id TEXT,
+                      started_at REAL NOT NULL, ended_at REAL, end_reason TEXT,
+                      cwd TEXT, git_repo_root TEXT, billing_provider TEXT,
+                      title TEXT, last_activity_at REAL,
+                      archived INTEGER NOT NULL DEFAULT 0
+                    );
+                    CREATE TABLE messages (
+                      id INTEGER PRIMARY KEY, session_id TEXT NOT NULL,
+                      role TEXT NOT NULL, content TEXT, timestamp REAL NOT NULL,
+                      active INTEGER NOT NULL DEFAULT 1,
+                      compacted INTEGER NOT NULL DEFAULT 0,
+                      _compressed_summary INTEGER NOT NULL DEFAULT 0
+                    );
+                    INSERT INTO sessions VALUES (
+                      '20260920_100000_fixture', 'cli', 'model-fixture', '{}',
+                      NULL, 1000, NULL, NULL, '/workspace/demo',
+                      '/workspace/demo', 'fictional', 'Hermes fixture', 1001, 0
+                    );
+                    INSERT INTO messages VALUES (
+                      1, '20260920_100000_fixture', 'assistant',
+                      'fixture inspected', 1001, 1, 0, 0
+                    );
+                    """
+                )
+            roots[hermes] = hermes_db
+            entries.extend(hermes.discover(hermes_db, ui.ScanProgress(False)))
+
             antigravity_root = root / "antigravity"
             antigravity_conversations = antigravity_root / "conversations"
             antigravity_conversations.mkdir(parents=True)
@@ -160,7 +193,7 @@ class InstalledSmoke(unittest.TestCase):
             )
             self.assertEqual(
                 {entry.source for entry in entries},
-                {"codex", "claude", "kimi", "omp", "opencode", "agy"},
+                {"codex", "claude", "hermes", "kimi", "omp", "opencode", "agy"},
             )
             for entry in entries:
                 self.assertIn("fixture inspected", views.digest(entry))
@@ -178,6 +211,8 @@ class InstalledSmoke(unittest.TestCase):
                 str(roots[opencode]),
                 "--antigravity-root",
                 str(roots[antigravity]),
+                "--hermes-db",
+                str(roots[hermes]),
                 "--no-progress",
             ]
             self.assertTrue(self.run_cli(executable, "summary", *arguments).strip())
