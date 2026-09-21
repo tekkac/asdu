@@ -53,6 +53,7 @@ def initialize_colors(no_color: bool) -> bool:
         10: 37 if color_count >= 256 else curses.COLOR_GREEN,
         11: 141 if color_count >= 256 else curses.COLOR_MAGENTA,
         12: 75 if color_count >= 256 else curses.COLOR_BLUE,
+        13: 48 if color_count >= 256 else curses.COLOR_GREEN,
     }
     for pair, color in colors.items():
         curses.init_pair(pair, color, background)
