@@ -127,8 +127,23 @@ def parser() -> argparse.ArgumentParser:
         help="Hermes session database (read-only)",
     )
     result.add_argument(
+        "--gemini-root",
+        type=Path,
+        default=Path.home() / ".gemini",
+        help="Gemini CLI session storage directory (read-only)",
+    )
+    result.add_argument(
         "--source",
-        choices=("codex", "claude", "hermes", "kimi", "omp", "opencode", "agy"),
+        choices=(
+            "codex",
+            "claude",
+            "hermes",
+            "kimi",
+            "omp",
+            "opencode",
+            "agy",
+            "gemini",
+        ),
         action="append",
         help="Repeat to select sources; default is all available",
     )
@@ -188,6 +203,7 @@ def run_main() -> int:
         args.opencode_db,
         args.antigravity_root,
         args.hermes_db,
+        args.gemini_root,
     )
     sources = tuple(dict.fromkeys(args.source or adapters))
     source_roots = {

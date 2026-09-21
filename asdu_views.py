@@ -396,6 +396,7 @@ def source_color(source: str) -> int:
         "kimi": 11,
         "opencode": 4,
         "agy": 12,
+        "gemini": 13,
     }.get(source, 0)
 
 

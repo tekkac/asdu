@@ -17,7 +17,16 @@ import asdu_browser
 import asdu_sessions
 import asdu_tui as ui
 import asdu_views as views
-from asdu_sources import antigravity, claude, codex, hermes, kimi, omp, opencode
+from asdu_sources import (
+    antigravity,
+    claude,
+    codex,
+    gemini,
+    hermes,
+    kimi,
+    omp,
+    opencode,
+)
 
 
 class InstalledSmoke(unittest.TestCase):
@@ -65,6 +74,40 @@ class InstalledSmoke(unittest.TestCase):
             shutil.copytree(fixtures / "kimi-code" / "sessions", kimi_root)
             roots[kimi] = kimi_root
             entries.extend(kimi.discover(kimi_root, ui.ScanProgress(False)))
+
+            gemini_root = root / "gemini"
+            gemini_project = gemini_root / "tmp" / "demo"
+            gemini_chat = gemini_project / "chats" / "session-fixture.jsonl"
+            gemini_chat.parent.mkdir(parents=True)
+            (gemini_project / ".project_root").write_text(
+                "/workspace/demo", encoding="utf-8"
+            )
+            gemini_chat.write_text(
+                "\n".join(
+                    (
+                        json.dumps(
+                            {
+                                "sessionId": "gemini-fixture-001",
+                                "projectHash": "fictional",
+                                "startTime": "2026-09-21T12:00:00Z",
+                                "lastUpdated": "2026-09-21T12:01:00Z",
+                                "summary": "Gemini fixture",
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "id": "gemini-message-001",
+                                "type": "gemini",
+                                "content": "fixture inspected",
+                            }
+                        ),
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            roots[gemini] = gemini_root
+            entries.extend(gemini.discover(gemini_root, ui.ScanProgress(False)))
 
             opencode_db = root / "opencode.db"
             with closing(sqlite3.connect(opencode_db)) as database, database:
@@ -193,7 +236,16 @@ class InstalledSmoke(unittest.TestCase):
             )
             self.assertEqual(
                 {entry.source for entry in entries},
-                {"codex", "claude", "hermes", "kimi", "omp", "opencode", "agy"},
+                {
+                    "codex",
+                    "claude",
+                    "gemini",
+                    "hermes",
+                    "kimi",
+                    "omp",
+                    "opencode",
+                    "agy",
+                },
             )
             for entry in entries:
                 self.assertIn("fixture inspected", views.digest(entry))
@@ -213,6 +265,8 @@ class InstalledSmoke(unittest.TestCase):
                 str(roots[antigravity]),
                 "--hermes-db",
                 str(roots[hermes]),
+                "--gemini-root",
+                str(roots[gemini]),
                 "--no-progress",
             ]
             self.assertTrue(self.run_cli(executable, "summary", *arguments).strip())
