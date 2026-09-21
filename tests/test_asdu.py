@@ -932,6 +932,44 @@ class ActionTests(unittest.TestCase):
 
 
 class CliAndReaderTests(unittest.TestCase):
+    def test_cli_accepts_a_bare_path_and_explicit_command_path(self):
+        argument_parser = asdu.parser()
+        cases = (
+            ([], "browse", None),
+            (["/workspace/demo"], "browse", Path("/workspace/demo")),
+            (["summary", "/workspace"], "summary", Path("/workspace")),
+            (["digest"], "digest", None),
+            (["./summary"], "browse", Path("summary")),
+        )
+        for arguments, command, path in cases:
+            with self.subTest(arguments=arguments):
+                parsed = argument_parser.parse_args(arguments)
+                self.assertEqual(
+                    asdu.invocation(argument_parser, parsed), (command, path)
+                )
+
+    def test_positional_path_sets_browser_start(self):
+        target = Path("/workspace/demo")
+        with (
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "asdu",
+                    str(target),
+                    "--no-progress",
+                    "--codex-root",
+                    str(FIXTURES),
+                    "--source",
+                    "codex",
+                ],
+            ),
+            patch.object(source_api, "scan", return_value=[]),
+            patch.object(ui, "tui") as tui,
+        ):
+            self.assertEqual(asdu.run_main(), 0)
+        self.assertEqual(tui.call_args.args[3], target.resolve())
+
     def test_windows_output_is_utf8_even_when_redirected(self):
         stdout = SimpleNamespace(
             reconfigure=lambda **options: setattr(stdout, "options", options)
@@ -1057,6 +1095,7 @@ class CliAndReaderTests(unittest.TestCase):
         for option in (
             "--all",
             "--config",
+            "--project",
             "--tag",
             "--content-keywords",
             "--no-content-cache",

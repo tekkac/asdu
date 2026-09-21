@@ -46,7 +46,7 @@ asdu
 Start somewhere else:
 
 ```sh
-asdu --project ~/
+asdu ~/
 ```
 
 The initial view shows folders. Press `g` for one flat list, then sources
