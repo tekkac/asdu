@@ -26,8 +26,6 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @unittest.skipUnless(os.name == "posix", "real PTY checks require POSIX")
 class TerminalTests(unittest.TestCase):
-    zellij = False
-
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
@@ -37,9 +35,6 @@ class TerminalTests(unittest.TestCase):
         self.resize(24, 100)
         self.original_modes = termios.tcgetattr(self.slave)
         env = dict(os.environ, TERM="xterm-256color", LC_ALL="C.UTF-8")
-        env.pop("ZELLIJ", None)
-        if self.zellij:
-            env["ZELLIJ"] = "1"
         for key in (
             "XDG_CACHE_HOME",
             "XDG_CONFIG_HOME",
@@ -111,15 +106,13 @@ class TerminalTests(unittest.TestCase):
         )
         self.read_for(0.05)
         self.assertNotIn(b"Traceback", self.output)
-        if self.zellij:
-            self.assertNotRegex(
-                self.output,
-                rb"\x1b\[\?(?:\d+;)*(?:1000|1002|1003)(?:;\d+)*h",
-                "Mouse capture prevents Zellij's pane-local selection",
-            )
-        else:
-            self.assertIn(b"\x1b[?1000h\x1b[?1006h", self.output)
-        self.assertIn(b"\x1b[?1000l\x1b[?1006l", self.output)
+        self.assertIn(b"\x1b[?1007h", self.output)
+        self.assertIn(b"\x1b[?1007l", self.output)
+        self.assertNotRegex(
+            self.output,
+            rb"\x1b\[\?(?:\d+;)*(?:1000|1002|1003|1006)(?:;\d+)*h",
+            "Default mode should leave mouse events with the terminal",
+        )
         self.assertIn(b"\x1b[2J", self.output.split(b"\x1b[?1049l")[-1])
         modes = termios.tcgetattr(self.slave)
         # BSD sets PENDIN when cooked input is restored; it is a transient flag.
@@ -135,7 +128,6 @@ class TerminalTests(unittest.TestCase):
             self.wait_for(b"asdu")
         os.write(self.master, b"q")
         self.finish(0)
-
     def test_ctrl_c_restores_terminal(self):
         self.process.send_signal(signal.SIGINT)
         self.finish(130)
@@ -159,9 +151,7 @@ class TerminalTests(unittest.TestCase):
         os.write(self.master, b"q")
         self.finish(0)
 
-    def test_wheel_momentum_cannot_undo_keyboard_reverse_at_boundaries(self):
-        if self.zellij:
-            self.skipTest("Zellij owns mouse reports and forwards scrolling as arrows")
+    def test_navigation_bursts_stop_at_boundaries_and_reverse(self):
         self.stop()
         termios.tcsetattr(self.slave, termios.TCSANOW, self.original_modes)
         read_fd, write_fd = os.pipe()
@@ -189,9 +179,7 @@ asdu_tui.tui(entries, 'cwd', 'name', Path('/fictional'), lambda _: entries)
             stdout=self.slave,
             stderr=self.slave,
             pass_fds=(write_fd,),
-            env=dict(
-                os.environ, TERM="xterm-256color", ZELLIJ="1" if self.zellij else ""
-            ),
+            env=dict(os.environ, TERM="xterm-256color"),
         )
         self.wait_for(b"find")
 
@@ -202,30 +190,14 @@ asdu_tui.tui(entries, 'cwd', 'name', Path('/fictional'), lambda _: entries)
                 data += os.read(read_fd, 65536)
             return [json.loads(line) for line in data.splitlines()]
 
-        for wheel, reverse, opposite, edge, expected in (
-            (b"\x1b[<65;10;10M", b"\x1bOA", b"\x1b[<64;10;10M", 8, 7),
-            (b"\x1b[<64;10;10M", b"\x1bOB", b"\x1b[<65;10;10M", 0, 1),
+        for outward, reverse, edge, expected in (
+            (b"\x1bOA", b"\x1bOB", 0, 1),
+            (b"\x1bOB", b"\x1bOA", 8, 7),
         ):
-            positions(0.3)  # Separate the two gestures.
-            os.write(self.master, wheel * 12)
+            positions(0.3)
+            os.write(self.master, outward * 12)
             self.assertEqual(positions(0.05)[-1], edge)
             os.write(self.master, reverse)
             self.assertEqual(positions(0.05)[-1], expected)
-            # Post-key momentum, including reports arriving in later frames.
-            for _ in range(6):
-                os.write(self.master, wheel * 3)
-                self.assertEqual(positions(0.05), [])
-            os.write(self.master, opposite)
-            step = -1 if edge else 1
-            self.assertEqual(positions(0.05)[-1], expected + step)
-            positions(0.3)
-            os.write(self.master, wheel)
-            self.assertEqual(positions(0.05)[-1], expected)
         os.write(self.master, b"q")
         self.finish(0)
-
-
-class ZellijTerminalTests(TerminalTests):
-    """The inner app must leave mouse ownership with the pane manager."""
-
-    zellij = True
