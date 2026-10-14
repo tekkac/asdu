@@ -190,14 +190,14 @@ asdu_tui.tui(entries, 'cwd', 'name', Path('/fictional'), lambda _: entries)
                 data += os.read(read_fd, 65536)
             return [json.loads(line) for line in data.splitlines()]
 
-        for outward, reverse, edge, expected in (
-            (b"\x1bOA", b"\x1bOB", 0, 1),
-            (b"\x1bOB", b"\x1bOA", 8, 7),
-        ):
-            positions(0.3)
-            os.write(self.master, outward * 12)
-            self.assertEqual(positions(0.05)[-1], edge)
-            os.write(self.master, reverse)
-            self.assertEqual(positions(0.05)[-1], expected)
+        positions(0.3)
+        os.write(self.master, b"\x1bOB" * 12)
+        self.assertEqual(positions(0.05)[-1], 8)
+        os.write(self.master, b"\x1bOA")
+        self.assertEqual(positions(0.05)[-1], 7)
+        os.write(self.master, b"\x1bOA" * 12)
+        self.assertEqual(positions(0.05)[-1], 0)
+        os.write(self.master, b"\x1bOB")
+        self.assertEqual(positions(0.05)[-1], 1)
         os.write(self.master, b"q")
         self.finish(0)
