@@ -79,6 +79,9 @@ folded.
 - `r` rescans.
 - `q` quits.
 
+Text selection stays with your terminal. On terminals that support alternate
+scroll, the mouse wheel moves through the list while selection remains available.
+
 Press `?` for help. Run `asdu --help` for command-line options.
 
 ## Session briefs

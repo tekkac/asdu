@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import curses
 import os
-import re
 import sys
 import threading
 import time
@@ -169,13 +168,8 @@ class ScanProgress:
             sys.stderr.flush()
 
 
-WHEEL_UP = curses.KEY_MAX + 1
-WHEEL_DOWN = curses.KEY_MAX + 2
 CTRL_F = 6
 SEARCH_KEYS = (CTRL_F, ord("/"))
-# Terminal wheel reports have no gesture-end marker. A quiet gap separates
-# gestures; reversing the wheel also starts a new gesture immediately.
-WHEEL_IDLE_SECONDS = 0.25
 
 
 class TerminalWindow:
@@ -186,9 +180,6 @@ class TerminalWindow:
         self.in_osc = False
         self.osc_escape = False
         self.delay = -1
-        self.last_wheel = None
-        self.wheel_direction = None
-        self.wheel_cancelled = False
 
     def __getattr__(self, name):
         return getattr(self.raw, name)
@@ -202,39 +193,10 @@ class TerminalWindow:
         self.raw.nodelay(enabled)
 
     def getch(self):
-        while True:
-            key = self._getch()
-            now = time.monotonic()
-            active = (
-                self.last_wheel is not None
-                and now - self.last_wheel < WHEEL_IDLE_SECONDS
-            )
-            if key in (WHEEL_UP, WHEEL_DOWN):
-                if not active or key != self.wheel_direction:
-                    self.wheel_cancelled = False
-                self.last_wheel, self.wheel_direction = now, key
-                if self.wheel_cancelled:
-                    continue
-                return curses.KEY_UP if key == WHEEL_UP else curses.KEY_DOWN
-            if key != -1 and active:
-                self.wheel_cancelled = True
-            return key
-
-    def _getch(self):
         for _ in range(256):
             key = self.raw.getch()
             if key == -1:
                 return key
-            if key == curses.KEY_MOUSE:
-                try:
-                    buttons = curses.getmouse()[4]
-                except curses.error:
-                    return -1
-                if buttons & curses.BUTTON4_PRESSED:
-                    return WHEEL_UP
-                if buttons & getattr(curses, "BUTTON5_PRESSED", 0):
-                    return WHEEL_DOWN
-                return -1
             if self.in_osc:
                 if key == 7 or (self.osc_escape and key == ord("\\")):
                     self.in_osc = False
@@ -256,12 +218,6 @@ class TerminalWindow:
                         sequence += chr(part)
                         if 0x40 <= part <= 0x7E:
                             break
-                    if sequence.startswith("<"):
-                        report = re.fullmatch(r"<(\d+);\d+;\d+M", sequence)
-                        if report:
-                            button = int(report[1]) & ~28  # Shift/Alt/Ctrl bits.
-                            return {64: WHEEL_UP, 65: WHEEL_DOWN}.get(button, -1)
-                        return -1
                     return {
                         "A": curses.KEY_UP,
                         "B": curses.KEY_DOWN,
@@ -1359,6 +1315,7 @@ def handle_tui_key(
             "g: switch between folder, source, and all-session views\n"
             "t: toggle session tree (↑↓ siblings, ←→ parent/child, Space fold, z all)\n"
             "a: source-supported session actions\n"
+            "Mouse wheel: scrolls with arrow keys when supported by the terminal\n"
             "q: quit",
         )
         return True
@@ -1422,7 +1379,7 @@ def tui(
 ) -> None:
     """A small ncdu-like drill-down UI with explicit source-aware actions."""
 
-    sgr_mouse = os.name != "nt" and not os.environ.get("ZELLIJ")
+    alternate_scroll = sys.stdout.isatty()
 
     def run(raw_window: curses.window) -> None:
         window = TerminalWindow(raw_window)
@@ -1430,21 +1387,8 @@ def tui(
             curses.curs_set(0)
         except curses.error:
             pass
-        # Zellij owns pane-local selection and translates alternate-screen
-        # scrolling into arrows. Capturing clicks here steals its selection.
-        capture_mouse = not os.environ.get("ZELLIJ")
-        try:
-            down_button = getattr(curses, "BUTTON5_PRESSED", 0)
-            curses.mousemask(
-                curses.BUTTON4_PRESSED | down_button
-                if capture_mouse and down_button
-                else 0
-            )
-            curses.mouseinterval(0)
-        except curses.error:
-            pass
-        if sgr_mouse and sys.stdout.isatty():
-            sys.stdout.write("\x1b[?1000h\x1b[?1006h")
+        if alternate_scroll:
+            sys.stdout.write("\x1b[?1007h")
             sys.stdout.flush()
 
         window.colors_enabled = initialize_colors(no_color)
@@ -1482,8 +1426,8 @@ def tui(
     try:
         curses.wrapper(run)
     finally:
-        if os.name != "nt" and sys.stdout.isatty():
-            sys.stdout.write("\x1b[?1000l\x1b[?1006l")
+        if alternate_scroll:
+            sys.stdout.write("\x1b[?1007l")
             sys.stdout.flush()
     clear_terminal()
 
