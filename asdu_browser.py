@@ -9,8 +9,10 @@ from pathlib import Path
 
 from asdu_sessions import (
     Session,
+    absolute_path,
     in_scope,
     is_filesystem_root,
+    session_cwd_path,
     session_label,
     short_home_path,
 )
@@ -53,7 +55,7 @@ def browser_visible_sessions(
 
 def scoped_sessions(sessions: Iterable[Session], directory: Path) -> list[Session]:
     """Return sessions below one filesystem root, plus unknowns at that root."""
-    directory = directory.resolve()
+    directory = absolute_path(directory)
     root = is_filesystem_root(directory)
     return [
         session
@@ -108,7 +110,7 @@ def cwd_listing(
     sessions: Iterable[Session], directory: Path, sort_by: str
 ) -> list[tuple[str, str, list[Session]]]:
     """Folder rows plus direct session rows, like an ncdu directory view."""
-    directory = directory.resolve()
+    directory = absolute_path(directory)
     folders: dict[str, list[Session]] = defaultdict(list)
     direct: list[Session] = []
     for session in sessions:
@@ -117,7 +119,7 @@ def cwd_listing(
                 folders["(unknown folder)"].append(session)
             continue
         try:
-            relative = Path(session.cwd).resolve().relative_to(directory)
+            relative = session_cwd_path(session.cwd).relative_to(directory)
         except ValueError:
             continue
         if relative == Path("."):

@@ -164,6 +164,30 @@ class BrowserTests(unittest.TestCase):
         ):
             self.assertNotIn("__asdu_all_sessions__", [item[1] for item in items])
 
+    def test_linux_cwds_browse_lexically_without_local_path_resolution(self):
+        cwd = "/home/someone/x"
+        entries = [session(f"linux-{index}", cwd=cwd) for index in range(1004)]
+        transcripts.session_cwd_path.cache_clear()
+        self.addCleanup(transcripts.session_cwd_path.cache_clear)
+        resolve = Path.resolve
+
+        def reject_home_resolution(path, *args, **kwargs):
+            if str(path) == "/home" or str(path).startswith("/home/"):
+                raise AssertionError(f"foreign cwd was resolved: {path}")
+            return resolve(path, *args, **kwargs)
+
+        with patch.object(
+            Path, "resolve", autospec=True, side_effect=reject_home_resolution
+        ):
+            screen = browse_screen(entries, [10, ord("q")], start=Path("/"))
+
+        first = " ".join(text for _, _, text, _ in screen.frames[0])
+        second = " ".join(text for _, _, text, _ in screen.frames[1])
+        self.assertIn("/home", first)
+        self.assertIn("/someone", second)
+        self.assertEqual(entries[0].cwd, cwd)
+        self.assertEqual(transcripts.session_cwd_path.cache_info().misses, 1)
+
     def test_group_cycles_to_flat_size_sorted_all_sessions(self):
         small = session("small", cwd="/project/a", size=1)
         large = session("large", cwd="/project/b", size=20)
@@ -968,7 +992,7 @@ class CliAndReaderTests(unittest.TestCase):
             patch.object(ui, "tui") as tui,
         ):
             self.assertEqual(asdu.run_main(), 0)
-        self.assertEqual(tui.call_args.args[3], target.resolve())
+        self.assertEqual(tui.call_args.args[3], transcripts.absolute_path(target))
 
     def test_windows_output_is_utf8_even_when_redirected(self):
         stdout = SimpleNamespace(
@@ -1083,7 +1107,9 @@ class CliAndReaderTests(unittest.TestCase):
             ),
         )
         self.assertEqual(tui.call_args.args[1], "cwd")
-        self.assertEqual(tui.call_args.args[3], Path.cwd().resolve())
+        self.assertEqual(
+            tui.call_args.args[3], transcripts.absolute_path(Path.cwd())
+        )
 
     def test_hermes_home_selects_its_state_database(self):
         with patch.dict(os.environ, {"HERMES_HOME": "/srv/hermes-profile"}):

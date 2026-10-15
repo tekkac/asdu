@@ -22,7 +22,7 @@ import asdu_sources as sources_api
 import asdu_tui as ui
 import asdu_views as view
 
-__version__ = "0.8.1"
+__version__ = "0.8.2"
 COMMANDS = ("browse", "summary", "digest")
 
 
@@ -240,7 +240,7 @@ def run_main() -> int:
         argument_parser.error(
             "no supported session roots found; pass a --*-root option"
         )
-    start = (start_path or Path.cwd()).resolve()
+    start = store.absolute_path(start_path or Path.cwd())
 
     def scan_current(
         render: Callable[[str, int, int, int, int, str], None] | None = None,

@@ -11,6 +11,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Protocol
 
@@ -283,13 +284,28 @@ def scan_paths(
     return sessions
 
 
+def absolute_path(path: Path) -> Path:
+    """Normalize a browser path lexically without consulting the filesystem."""
+    return Path(os.path.abspath(path))
+
+
+@lru_cache(maxsize=8192)
+def session_cwd_path(cwd: str) -> Path:
+    """Interpret recorded working directories without resolving local symlinks.
+
+    Session metadata may come from another machine. Realpath can block on local
+    automounts and rewrite a foreign path, so preserve its lexical location.
+    """
+    return Path(os.path.abspath(cwd))
+
+
 def in_scope(session: Session, scope: Path | None) -> bool:
     if scope is None:
         return True
     if session.cwd == "(unknown)":
         return False
     try:
-        Path(session.cwd).resolve().relative_to(scope.resolve())
+        session_cwd_path(session.cwd).relative_to(absolute_path(scope))
         return True
     except (OSError, ValueError):
         return False

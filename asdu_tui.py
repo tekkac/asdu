@@ -386,7 +386,7 @@ def refresh_tui_view(state: TuiState, frame: TuiFrame) -> None:
     )
     name = browser.detail[0]
     entries = (
-        [s for s in current if Path(s.cwd).resolve() == browser.cwd_node]
+        [s for s in current if store.session_cwd_path(s.cwd) == browser.cwd_node]
         if state.mode == "cwd"
         else next((es for _, key, es in current_items if key == name), [])
     )
