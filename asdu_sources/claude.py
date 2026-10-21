@@ -1,6 +1,7 @@
 """Claude JSONL discovery and message parsing."""
 
 import json
+import re
 import subprocess
 from collections.abc import Iterable
 from pathlib import Path
@@ -20,6 +21,8 @@ from asdu_sessions import (
     trash_session,
     untitled_title,
 )
+
+SESSION_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
 def available_actions(session: Session) -> frozenset[str]:
@@ -176,7 +179,7 @@ def discover(root: Path, progress: ScanReporter) -> list[Session]:
                 recognized = True
             if item.get("isSidechain") is False and origin != "sidechain":
                 origin = "primary"
-            if item.get("isSidechain") is True:
+            if item.get("isSidechain") is True and origin != "primary":
                 if isinstance(agent_id, str) and agent_id:
                     session_id = agent_id
                     parent_id = (
@@ -196,6 +199,8 @@ def discover(root: Path, progress: ScanReporter) -> list[Session]:
                     title = clean
             if cwd != "(unknown)" and session_id != path.stem and title != "untitled":
                 break
+        if origin == "primary" and SESSION_ID.fullmatch(path.stem):
+            session_id = path.stem
         if not recognized and cwd == "(unknown)":
             return None
         try:
@@ -290,6 +295,7 @@ def load_brief(session, poll=None, preview=False):
         poll,
         preview,
         enrich_brief,
+        compaction_subtypes=("compact_boundary",),
     )
 
 

@@ -522,6 +522,31 @@ class RenderingTests(unittest.TestCase):
         entry = codex.discover(FIXTURES, ui.ScanProgress(False))[0]
         self.assertIn("2 messages across 3 events", views.digest(entry))
 
+    def test_claude_brief_counts_compact_boundary_events(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "claude-session.jsonl"
+            records = [
+                {
+                    "type": "user",
+                    "message": {"role": "user", "content": "Review this project"},
+                },
+                {
+                    "type": "system",
+                    "subtype": "compact_boundary",
+                    "content": "Conversation compacted",
+                },
+                {
+                    "type": "assistant",
+                    "message": {"role": "assistant", "content": "Review complete."},
+                },
+            ]
+            path.write_text("\n".join(map(json.dumps, records)) + "\n")
+            entry = replace(session("claude", source="claude"), path=path)
+
+            brief = views.digest(entry, controls=transcripts.SessionControls())
+
+        self.assertIn("2 messages across 3 events; 1 compactions", brief)
+
     def test_archived_session_brief_states_storage_explicitly(self):
         entry = replace(
             codex.discover(FIXTURES, ui.ScanProgress(False))[0], archived=True

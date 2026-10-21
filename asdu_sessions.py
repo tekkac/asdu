@@ -381,11 +381,13 @@ def read_jsonl_brief(
     enrich=None,
     turn_events: tuple[str, ...] = ("turn_context",),
     compaction_events: tuple[str, ...] = ("compacted", "context_compacted"),
+    compaction_subtypes: tuple[str, ...] = (),
 ) -> BriefData:
     """Shared streaming and preview mechanics; formats belong to source readers."""
     data = BriefData(
         None, None, None, None, Counter(), [], session.task_path, session.forked_from
     )
+    subtype_compactions = 0
     with (
         preview_transcript(session.path)
         if preview
@@ -401,6 +403,7 @@ def read_jsonl_brief(
             if not isinstance(item, dict):
                 continue
             data.event_counts[str(item.get("type", "unknown"))] += 1
+            subtype_compactions += item.get("subtype") in compaction_subtypes
             if enrich is not None:
                 enrich(item, data)
             found_user = False
@@ -418,5 +421,7 @@ def read_jsonl_brief(
                     data.latest_reply = text
             data.assistant_messages += found_assistant
     data.turns = sum(data.event_counts[event] for event in turn_events)
-    data.compactions = sum(data.event_counts[event] for event in compaction_events)
+    data.compactions = (
+        sum(data.event_counts[event] for event in compaction_events) + subtype_compactions
+    )
     return data

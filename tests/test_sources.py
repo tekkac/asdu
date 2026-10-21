@@ -292,6 +292,104 @@ class SourceTests(unittest.TestCase):
             ("Renamed", "subagent", "child", "parent"),
         )
 
+    def test_claude_inline_sidechain_turns_do_not_reclassify_the_main_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            identifier = "11111111-1111-4111-8111-111111111111"
+            path = root / f"{identifier}.jsonl"
+            rows = [
+                {
+                    "type": "user",
+                    "sessionId": identifier,
+                    "cwd": "/fictional/project",
+                    "isSidechain": False,
+                    "message": {"role": "user", "content": "Review this project"},
+                },
+                {
+                    "type": "user",
+                    "sessionId": identifier,
+                    "cwd": "/fictional/project",
+                    "isSidechain": True,
+                    "message": {"role": "user", "content": "Inspect the source tree"},
+                },
+                {
+                    "type": "assistant",
+                    "sessionId": identifier,
+                    "cwd": "/fictional/project",
+                    "isSidechain": False,
+                    "message": {"role": "assistant", "content": "Review complete."},
+                },
+            ]
+            path.write_text("\n".join(map(json.dumps, rows)) + "\n")
+
+            entries = claude.discover(root, ui.ScanProgress(False))
+
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].origin, "primary")
+        self.assertEqual(entries[0].session_id, identifier)
+
+    def test_claude_resumed_main_keeps_its_id_and_links_its_subagent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parent_id = "22222222-2222-4222-8222-222222222222"
+            resumed_id = "33333333-3333-4333-8333-333333333333"
+
+            def row(kind, session_id, text, *, sidechain=False, agent_id=None):
+                return {
+                    "type": kind,
+                    "sessionId": session_id,
+                    "cwd": "/fictional/project",
+                    "isSidechain": sidechain,
+                    "version": "2.0.55",
+                    "agentId": agent_id,
+                    "message": {
+                        "role": kind,
+                        "content": text
+                        if kind == "user"
+                        else [{"type": "text", "text": text}],
+                    },
+                }
+
+            transcripts = {
+                f"{parent_id}.jsonl": [
+                    row("user", parent_id, "Plan the release"),
+                    row("assistant", parent_id, "Here is a plan."),
+                ],
+                f"{resumed_id}.jsonl": [
+                    row("user", parent_id, "Plan the release"),
+                    row("assistant", parent_id, "Here is a plan."),
+                    row("user", resumed_id, "Write the changelog"),
+                    row("assistant", resumed_id, "Changelog written."),
+                ],
+                "agent-abcdef12.jsonl": [
+                    row(
+                        "user",
+                        parent_id,
+                        "Check the version numbers",
+                        sidechain=True,
+                        agent_id="abcdef12",
+                    ),
+                    row(
+                        "assistant",
+                        parent_id,
+                        "They match.",
+                        sidechain=True,
+                        agent_id="abcdef12",
+                    ),
+                ],
+            }
+            for filename, records in transcripts.items():
+                (root / filename).write_text("\n".join(map(json.dumps, records)) + "\n")
+
+            entries = claude.discover(root, ui.ScanProgress(False))
+            by_filename = {entry.path.name: entry for entry in entries}
+            links = browser.parent_links(entries)
+
+        self.assertEqual(by_filename[f"{resumed_id}.jsonl"].session_id, resumed_id)
+        child = by_filename["agent-abcdef12.jsonl"]
+        parent = by_filename[f"{parent_id}.jsonl"]
+        self.assertEqual(links[browser.row_id(child)], browser.row_id(parent))
+
     def test_claude_only_scans_known_jsonl_layouts(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
