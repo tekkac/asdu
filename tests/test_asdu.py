@@ -1043,6 +1043,10 @@ class CliAndReaderTests(unittest.TestCase):
         self.assertIn("sys_platform == 'win32'", windows[0])
         self.assertIn(windows[0], SCRIPT.read_text())
 
+    def test_runtime_version_matches_project_metadata(self):
+        project = tomllib.loads((SCRIPT.parent / "pyproject.toml").read_text())
+        self.assertEqual(asdu.__version__, project["project"]["version"])
+
     def test_digest_prefers_exact_id_over_child_prefixes(self):
         parent = transcripts.Session(
             FIXTURES / "rollout-codex.jsonl",
