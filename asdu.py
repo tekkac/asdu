@@ -22,7 +22,7 @@ import asdu_sources as sources_api
 import asdu_tui as ui
 import asdu_views as view
 
-__version__ = "0.8.2"
+__version__ = "0.8.3"
 COMMANDS = ("browse", "summary", "digest")
 
 
