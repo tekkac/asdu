@@ -382,6 +382,58 @@ class TreeTests(unittest.TestCase):
         self.assertIn("▸", frame_text(screen))
         self.assertIn("t tree", frame_text(screen))
 
+    def test_space_marks_explicit_rows_without_folding_tree(self):
+        root = Path("/project")
+        parent = session("parent", source="claude", title="parent")
+        child = session(
+            "child", "parent", source="claude", origin="subagent", title="child"
+        )
+        untouched = session("untouched", source="claude", title="untouched")
+        state = ui.TuiState(
+            [parent, child, untouched],
+            "all",
+            "name",
+            root,
+            browser.BrowserState.create(root),
+            source_filter="claude",
+        )
+        screen = Screen([])
+        frame = ui.render_tui_frame(screen, state)
+        ui.handle_tui_key(screen, state, frame, ord("t"), lambda _: [])
+        frame = ui.render_tui_frame(screen, state)
+        self.assertTrue(state.tree_mode)
+        self.assertIn(browser.row_id(parent), state.collapsed_nodes)
+
+        collapsed = state.collapsed_nodes.copy()
+        ui.handle_tui_key(screen, state, frame, ord(" "), lambda _: [])
+        self.assertEqual(state.collapsed_nodes, collapsed)
+        self.assertIn(parent.storage_key, state.marked_sessions)
+
+        frame = ui.render_tui_frame(screen, state)
+        ui.handle_tui_key(screen, state, frame, ui.curses.KEY_RIGHT, lambda _: [])
+        frame = ui.render_tui_frame(screen, state)
+        ui.handle_tui_key(screen, state, frame, ui.curses.KEY_RIGHT, lambda _: [])
+        frame = ui.render_tui_frame(screen, state)
+        self.assertEqual(frame.selected_entry, child)
+        ui.handle_tui_key(screen, state, frame, ord(" "), lambda _: [])
+        self.assertEqual(
+            state.marked_sessions, {parent.storage_key, child.storage_key}
+        )
+        with (
+            patch.object(ui.view, "confirm_batch_action", return_value="trash"),
+            patch.object(ui.view, "confirm_trash", return_value=True),
+            patch.object(ui.source, "prepare_session_actions") as prepare,
+            patch.object(
+                ui.source,
+                "perform_prepared_action",
+                side_effect=[transcripts.ActionResult(), transcripts.ActionResult()],
+            ),
+            patch.object(ui.store, "record_action"),
+        ):
+            ui.run_batch_action(screen, state)
+        prepare.assert_called_once_with([parent, child], "trash")
+        self.assertEqual([entry.title for entry in state.sessions], ["untouched"])
+
     def test_all_sessions_tree_arrows_expand_and_enter_children(self):
         parent, child = session("parent"), session("child", "parent")
         screen = browse_screen(
@@ -696,6 +748,92 @@ class RenderingTests(unittest.TestCase):
 
 
 class ActionTests(unittest.TestCase):
+    def test_batch_dialog_summarizes_selection_and_defaults_to_cancel(self):
+        entries = [
+            session("one", source="claude", size=10),
+            session("two", source="claude", size=20),
+        ]
+        screen = Screen([10])
+        self.assertIsNone(views.confirm_batch_action(screen, entries, {"trash"}))
+        text = " ".join(item[2] for item in screen.frames[-1])
+        self.assertIn("2 selected sessions | Claude", text)
+        self.assertIn("Combined size: 30 B", text)
+        self.assertIn("Trash", text)
+        self.assertIn("Cancel", text)
+
+    def test_bulk_selection_requires_single_source_all_sessions_list(self):
+        root = Path("/project")
+        entries = [session("one", source="claude")]
+        state = ui.TuiState(
+            entries,
+            "all",
+            "name",
+            root,
+            browser.BrowserState.create(root),
+            source_filter="claude",
+        )
+        self.assertTrue(ui.bulk_selection_allowed(state))
+        state.source_filter = "all"
+        self.assertTrue(ui.bulk_selection_allowed(state))
+        state.sessions.append(session("other", source="codex"))
+        state.view_key = None
+        self.assertFalse(ui.bulk_selection_allowed(state))
+        state.source_filter = "claude"
+        self.assertTrue(ui.bulk_selection_allowed(state))
+        state.tree_mode = True
+        self.assertTrue(ui.bulk_selection_allowed(state))
+        state.tree_mode = False
+        state.mode = "cwd"
+        self.assertFalse(ui.bulk_selection_allowed(state))
+
+    def test_marked_claude_sessions_are_trashed_as_one_batch(self):
+        root = Path("/project")
+        entries = [
+            session("first", source="claude", title="first"),
+            session("second", source="claude", title="second"),
+            session("third", source="claude", title="third"),
+        ]
+        state = ui.TuiState(
+            entries.copy(),
+            "all",
+            "name",
+            root,
+            browser.BrowserState.create(root),
+            source_filter="claude",
+        )
+        screen = Screen([])
+        frame = ui.render_tui_frame(screen, state)
+        state.browser.selected = 0
+        frame = ui.render_tui_frame(screen, state)
+        ui.handle_tui_key(screen, state, frame, ord(" "), lambda _: [])
+        state.browser.selected = 1
+        frame = ui.render_tui_frame(screen, state)
+        ui.handle_tui_key(screen, state, frame, ord(" "), lambda _: [])
+        frame = ui.render_tui_frame(screen, state)
+        marked = ui.marked_sessions(state)
+        self.assertEqual({entry.title for entry in marked}, {"first", "second"})
+        text = frame_text(screen)
+        self.assertIn("[x] first", text)
+        self.assertIn("[x] second", text)
+
+        with (
+            patch.object(ui.view, "confirm_batch_action", return_value="trash"),
+            patch.object(ui.view, "confirm_trash", return_value=True),
+            patch.object(ui.source, "prepare_session_actions") as prepare,
+            patch.object(
+                ui.source,
+                "perform_prepared_action",
+                side_effect=[transcripts.ActionResult(), transcripts.ActionResult()],
+            ),
+            patch.object(ui.store, "record_action"),
+        ):
+            ui.run_batch_action(screen, state)
+
+        prepare.assert_called_once_with(marked, "trash")
+        self.assertEqual([entry.title for entry in state.sessions], ["third"])
+        self.assertFalse(state.marked_sessions)
+        self.assertIn("Trashed 2 sessions", state.status)
+
     def test_claude_has_only_recoverable_trash(self):
         self.assertEqual(
             available_actions(session("claude", source="claude")), {"trash"}
