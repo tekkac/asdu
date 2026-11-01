@@ -683,7 +683,10 @@ def confirm_session_action(
 
 
 def confirm_batch_action(
-    window: curses.window, sessions: list[Session], actions: set[str]
+    window: curses.window,
+    sessions: list[Session],
+    actions: set[str],
+    selected_count: int | None = None,
 ) -> str | None:
     """Choose one action shared by an explicit, same-source selection."""
     ordered = [
@@ -694,11 +697,17 @@ def confirm_batch_action(
     if not sessions or not ordered:
         return None
     count = len(sessions)
+    selected_count = count if selected_count is None else selected_count
     total = sum(session.size for session in sessions)
     logical = any(session.size_is_logical for session in sessions)
     source = source_name(sessions[0].source)
     body = [
-        f"{count} selected sessions | {source}",
+        f"{selected_count} selected sessions | {source}",
+        *(
+            [f"{count} sessions including descendants"]
+            if count > selected_count
+            else []
+        ),
         f"Combined size: {session_size(total, logical)}",
     ]
     verbs = {
@@ -706,7 +715,12 @@ def confirm_batch_action(
         "archive": ("a", "Archive", "move to native archive | reversible"),
         "unarchive": ("u", "Unarchive", "restore to active sessions"),
         "trash": ("t", "Trash", "move to system Trash | recoverable"),
-        "delete": ("d", "Delete", "permanent native delete"),
+        "delete": (
+            "d",
+            "Delete",
+            "permanent native delete"
+            + (" | includes descendants" if count > selected_count else ""),
+        ),
     }
     labels = {
         action: f"{verbs[action][0]}  {verbs[action][1]:<9}  {verbs[action][2]}"

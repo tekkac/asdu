@@ -401,22 +401,26 @@ def marked_sessions(state: TuiState) -> list[Session]:
     return current
 
 
-def batch_actions(sessions: list[Session]) -> set[str]:
+def batch_actions(
+    sessions: list[Session], all_sessions: list[Session] | None = None
+) -> set[str]:
     """Return common actions that are safe for explicit multi-row selection."""
     if not sessions:
         return set()
     actions = set.intersection(
         *(set(source.available_actions(session)) for session in sessions)
     )
-    actions = {
-        action
-        for action in actions
-        if all(
-            source.action_scope(session, action) != "native-tree"
-            for session in sessions
-        )
-        and (action != "export" or len(sessions) == 1)
-    }
+    if len(sessions) > 1:
+        actions.discard("export")
+    if all_sessions is None:
+        actions = {
+            action
+            for action in actions
+            if all(
+                source.action_scope(session, action) != "native-tree"
+                for session in sessions
+            )
+        }
     return actions
 
 
@@ -876,8 +880,14 @@ def render_tui_frame(window: curses.window, state: TuiState) -> TuiFrame:
         and source.available_actions(selected_entry)
     ):
         commands.append("Space mark")
-    if marked and (len(marked) == 1 or batch_actions(marked)):
-        commands.append("a action" if len(marked) == 1 else "a actions")
+    if marked:
+        commands.append(
+            "a action"
+            if len(marked) == 1
+            else "a actions"
+            if batch_actions(marked, state.sessions)
+            else "a why"
+        )
     elif selected_entry is not None and source.available_actions(selected_entry):
         commands.append("a action")
     if (
@@ -1094,6 +1104,7 @@ def execute_session_action(
     failures = []
     log_error = None
     changed = 0
+    changed_sessions = []
     destination = None
     for target in invocations:
         try:
@@ -1102,8 +1113,13 @@ def execute_session_action(
             failures.append(str(error))
             break
         destination = outcome.destination or destination
-        affected = targets if scope == "native-tree" else [target]
+        affected = (
+            model.session_subtree(targets, target)
+            if scope == "native-tree"
+            else [target]
+        )
         changed += len(affected)
+        changed_sessions.extend(affected)
         try:
             store.record_action(
                 action,
@@ -1138,11 +1154,10 @@ def execute_session_action(
     if failures:
         state.status = f"{result} {changed}/{len(targets)}; stopped: {failures[0]}"
     else:
-        affected = targets[:changed]
         freed = (
             0
             if action in {"export", "archive", "unarchive"}
-            else sum(target.size for target in affected)
+            else sum(target.size for target in changed_sessions)
         )
         if state.search_results is not None:
             current = state.search_results
@@ -1159,9 +1174,9 @@ def execute_session_action(
         }[action]
         count = f"{changed} sessions | " if changed > 1 else ""
         amount = view.session_size(
-            freed, any(target.size_is_logical for target in affected)
+            freed, any(target.size_is_logical for target in changed_sessions)
         )
-        if any(target.size_is_logical for target in affected):
+        if any(target.size_is_logical for target in changed_sessions):
             amount += " logical"
         state.status = (
             f"Exported to {view.short_path(str(destination))} | {permanence}"
@@ -1186,11 +1201,47 @@ def run_batch_action(window: curses.window, state: TuiState) -> None:
     if len({target.source for target in targets}) != 1:
         state.status = "Bulk actions cannot cross sources."
         return
-    actions = batch_actions(targets)
+    selected = targets
+    actions = batch_actions(selected, state.sessions)
     if not actions:
         state.status = "No shared bulk action for these sessions."
         return
-    action = view.confirm_batch_action(window, targets, actions)
+    native_tree = any(
+        source.action_scope(session, action) == "native-tree"
+        for session in selected
+        for action in actions
+    )
+    invocations = selected
+    targets = selected
+    scope = "single"
+    if native_tree:
+        selected_ids = {model.row_id(session) for session in selected}
+        parents = model.parent_links(state.sessions)
+
+        def has_selected_ancestor(session: Session) -> bool:
+            parent = parents.get(model.row_id(session))
+            while parent is not None:
+                if parent in selected_ids:
+                    return True
+                parent = parents.get(parent)
+            return False
+
+        invocations = [
+            session
+            for session in selected
+            if not has_selected_ancestor(session)
+        ]
+        targets = list(
+            {
+                model.row_id(descendant): descendant
+                for root in invocations
+                for descendant in model.session_subtree(state.sessions, root)
+            }.values()
+        )
+        scope = "native-tree"
+    action = view.confirm_batch_action(
+        window, targets, actions, selected_count=len(selected)
+    )
     if action is None:
         return
     confirmed = (
@@ -1203,7 +1254,7 @@ def run_batch_action(window: curses.window, state: TuiState) -> None:
     if not confirmed:
         return
     execute_session_action(
-        state, action, targets, targets, "single", targets[0]
+        state, action, targets, invocations, scope, invocations[0]
     )
 
 
@@ -1473,7 +1524,11 @@ def handle_tui_key(
         )
     elif key == ord("a") and selected_entry is not None:
         if state.marked_sessions:
-            run_batch_action(window, state)
+            marked = marked_sessions(state)
+            if len(marked) == 1:
+                run_session_action(window, state, frame, marked[0])
+            else:
+                run_batch_action(window, state)
         else:
             run_session_action(window, state, frame, selected_entry)
     elif key in (ord("f"), ord("F")):
