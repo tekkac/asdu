@@ -382,6 +382,58 @@ class TreeTests(unittest.TestCase):
         self.assertIn("▸", frame_text(screen))
         self.assertIn("t tree", frame_text(screen))
 
+    def test_space_marks_explicit_rows_without_folding_tree(self):
+        root = Path("/project")
+        parent = session("parent", source="claude", title="parent")
+        child = session(
+            "child", "parent", source="claude", origin="subagent", title="child"
+        )
+        untouched = session("untouched", source="claude", title="untouched")
+        state = ui.TuiState(
+            [parent, child, untouched],
+            "all",
+            "name",
+            root,
+            browser.BrowserState.create(root),
+            source_filter="claude",
+        )
+        screen = Screen([])
+        frame = ui.render_tui_frame(screen, state)
+        ui.handle_tui_key(screen, state, frame, ord("t"), lambda _: [])
+        frame = ui.render_tui_frame(screen, state)
+        self.assertTrue(state.tree_mode)
+        self.assertIn(browser.row_id(parent), state.collapsed_nodes)
+
+        collapsed = state.collapsed_nodes.copy()
+        ui.handle_tui_key(screen, state, frame, ord(" "), lambda _: [])
+        self.assertEqual(state.collapsed_nodes, collapsed)
+        self.assertIn(parent.storage_key, state.marked_sessions)
+
+        frame = ui.render_tui_frame(screen, state)
+        ui.handle_tui_key(screen, state, frame, ui.curses.KEY_RIGHT, lambda _: [])
+        frame = ui.render_tui_frame(screen, state)
+        ui.handle_tui_key(screen, state, frame, ui.curses.KEY_RIGHT, lambda _: [])
+        frame = ui.render_tui_frame(screen, state)
+        self.assertEqual(frame.selected_entry, child)
+        ui.handle_tui_key(screen, state, frame, ord(" "), lambda _: [])
+        self.assertEqual(
+            state.marked_sessions, {parent.storage_key, child.storage_key}
+        )
+        with (
+            patch.object(ui.view, "confirm_batch_action", return_value="trash"),
+            patch.object(ui.view, "confirm_trash", return_value=True),
+            patch.object(ui.source, "prepare_session_actions") as prepare,
+            patch.object(
+                ui.source,
+                "perform_prepared_action",
+                side_effect=[transcripts.ActionResult(), transcripts.ActionResult()],
+            ),
+            patch.object(ui.store, "record_action"),
+        ):
+            ui.run_batch_action(screen, state)
+        prepare.assert_called_once_with([parent, child], "trash")
+        self.assertEqual([entry.title for entry in state.sessions], ["untouched"])
+
     def test_all_sessions_tree_arrows_expand_and_enter_children(self):
         parent, child = session("parent"), session("child", "parent")
         screen = browse_screen(
@@ -696,6 +748,270 @@ class RenderingTests(unittest.TestCase):
 
 
 class ActionTests(unittest.TestCase):
+    def test_batch_dialog_summarizes_selection_and_defaults_to_cancel(self):
+        entries = [
+            session("one", source="claude", size=10),
+            session("two", source="claude", size=20),
+        ]
+        screen = Screen([10])
+        self.assertIsNone(views.confirm_batch_action(screen, entries, {"trash"}))
+        text = " ".join(item[2] for item in screen.frames[-1])
+        self.assertIn("2 selected sessions | Claude", text)
+        self.assertIn("Combined size: 30 B", text)
+        self.assertIn("Trash", text)
+        self.assertIn("Cancel", text)
+
+    def test_batch_dialog_shows_native_tree_impact(self):
+        entries = [
+            session("parent", source="opencode"),
+            session("child", "parent", source="opencode"),
+            session("other", source="opencode"),
+        ]
+        screen = Screen([ord("q")])
+
+        views.confirm_batch_action(screen, entries, {"delete"}, selected_count=2)
+
+        text = " ".join(item[2] for item in screen.frames[-1])
+        self.assertIn("2 selected sessions", text)
+        self.assertIn("3 sessions including descendants", text)
+        self.assertIn("includes descendants", text)
+
+    def test_bulk_selection_requires_single_source_all_sessions_list(self):
+        root = Path("/project")
+        entries = [session("one", source="claude")]
+        state = ui.TuiState(
+            entries,
+            "all",
+            "name",
+            root,
+            browser.BrowserState.create(root),
+            source_filter="claude",
+        )
+        self.assertTrue(ui.bulk_selection_allowed(state))
+        state.source_filter = "all"
+        self.assertTrue(ui.bulk_selection_allowed(state))
+        state.sessions.append(session("other", source="codex"))
+        state.view_key = None
+        self.assertFalse(ui.bulk_selection_allowed(state))
+        state.source_filter = "claude"
+        self.assertTrue(ui.bulk_selection_allowed(state))
+        state.tree_mode = True
+        self.assertTrue(ui.bulk_selection_allowed(state))
+        state.tree_mode = False
+        state.mode = "cwd"
+        self.assertFalse(ui.bulk_selection_allowed(state))
+
+    def test_opencode_batch_delete_includes_descendants(self):
+        parent = session("parent", source="opencode")
+        child = session("child", "parent", source="opencode")
+        leaf = session("leaf", source="opencode")
+
+        self.assertEqual(
+            ui.batch_actions([child, leaf], [parent, child, leaf]), {"delete"}
+        )
+        self.assertEqual(
+            ui.batch_actions([parent, leaf], [parent, child, leaf]), {"delete"}
+        )
+
+    def test_action_on_one_marked_opencode_session_uses_native_dialog(self):
+        root = Path("/project")
+        parent = session("parent", source="opencode", title="parent")
+        child = session("child", "parent", source="opencode", title="child")
+        state = ui.TuiState(
+            [parent, child],
+            "all",
+            "name",
+            root,
+            browser.BrowserState.create(root),
+            source_filter="opencode",
+        )
+        state.marked_sessions.add(parent.storage_key)
+        screen = Screen([])
+        frame = ui.render_tui_frame(screen, state)
+
+        with patch.object(ui, "run_session_action") as action:
+            ui.handle_tui_key(screen, state, frame, ord("a"), lambda _: [])
+
+        action.assert_called_once_with(screen, state, frame, parent)
+
+    def test_marked_opencode_leaves_can_be_batch_deleted(self):
+        root = Path("/project")
+        entries = [
+            session("first", source="opencode", title="first"),
+            session("second", source="opencode", title="second"),
+        ]
+        state = ui.TuiState(
+            entries.copy(),
+            "all",
+            "name",
+            root,
+            browser.BrowserState.create(root),
+            source_filter="opencode",
+        )
+        screen = Screen([])
+        frame = ui.render_tui_frame(screen, state)
+        for index in range(2):
+            state.browser.selected = index
+            frame = ui.render_tui_frame(screen, state)
+            ui.handle_tui_key(screen, state, frame, ord(" "), lambda _: [])
+
+        with (
+            patch.object(ui.view, "confirm_batch_action", return_value="delete"),
+            patch.object(ui.view, "confirm_permanent_delete", return_value=True),
+            patch.object(ui.source, "prepare_session_actions") as prepare,
+            patch.object(
+                ui.source,
+                "perform_prepared_action",
+                side_effect=[transcripts.ActionResult(), transcripts.ActionResult()],
+            ) as perform,
+            patch.object(ui.store, "record_action"),
+        ):
+            ui.run_batch_action(screen, state)
+
+        prepare.assert_called_once_with(entries, "delete")
+        self.assertEqual(perform.call_count, 2)
+        self.assertFalse(state.sessions)
+        self.assertIn("Deleted 2 sessions", state.status)
+
+    def test_marked_opencode_parent_batch_deletes_tree_once(self):
+        root = Path("/project")
+        parent = session("parent", source="opencode", title="parent")
+        child = session("child", "parent", source="opencode", title="child")
+        other = session("other", source="opencode", title="other")
+        entries = [parent, child, other]
+        state = ui.TuiState(
+            entries.copy(),
+            "all",
+            "name",
+            root,
+            browser.BrowserState.create(root),
+            source_filter="opencode",
+        )
+        state.marked_sessions.update(
+            entry.storage_key for entry in (parent, other)
+        )
+        screen = Screen([])
+
+        with (
+            patch.object(
+                ui.view, "confirm_batch_action", return_value="delete"
+            ) as confirm_batch,
+            patch.object(ui.view, "confirm_permanent_delete", return_value=True) as confirm_delete,
+            patch.object(ui.source, "prepare_session_actions") as prepare,
+            patch.object(
+                ui.source,
+                "perform_prepared_action",
+                side_effect=[transcripts.ActionResult(), transcripts.ActionResult()],
+            ) as perform,
+            patch.object(ui.store, "record_action"),
+        ):
+            ui.run_batch_action(screen, state)
+
+        self.assertEqual(prepare.call_count, 1)
+        self.assertEqual(
+            {entry.session_id for entry in prepare.call_args.args[0]},
+            {"parent", "child", "other"},
+        )
+        self.assertEqual(perform.call_count, 2)
+        self.assertEqual(
+            {call.args[0].session_id for call in perform.call_args_list},
+            {"parent", "other"},
+        )
+        self.assertEqual(confirm_batch.call_count, 1)
+        self.assertEqual(
+            {entry.session_id for entry in confirm_batch.call_args.args[1]},
+            {"parent", "child", "other"},
+        )
+        self.assertEqual(confirm_batch.call_args.kwargs["selected_count"], 2)
+        self.assertEqual(confirm_batch.call_args.args[2], {"delete"})
+        confirm_delete.assert_called_once_with(screen, 3)
+        self.assertFalse(state.sessions)
+
+    def test_marked_claude_sessions_are_trashed_as_one_batch(self):
+        root = Path("/project")
+        entries = [
+            session("first", source="claude", title="first"),
+            session("second", source="claude", title="second"),
+            session("third", source="claude", title="third"),
+        ]
+        state = ui.TuiState(
+            entries.copy(),
+            "all",
+            "name",
+            root,
+            browser.BrowserState.create(root),
+            source_filter="claude",
+        )
+        screen = Screen([])
+        frame = ui.render_tui_frame(screen, state)
+        state.browser.selected = 0
+        frame = ui.render_tui_frame(screen, state)
+        ui.handle_tui_key(screen, state, frame, ord(" "), lambda _: [])
+        state.browser.selected = 1
+        frame = ui.render_tui_frame(screen, state)
+        ui.handle_tui_key(screen, state, frame, ord(" "), lambda _: [])
+        frame = ui.render_tui_frame(screen, state)
+        marked = ui.marked_sessions(state)
+        self.assertEqual({entry.title for entry in marked}, {"first", "second"})
+        text = frame_text(screen)
+        self.assertIn("[x] first", text)
+        self.assertIn("[x] second", text)
+
+        with (
+            patch.object(ui.view, "confirm_batch_action", return_value="trash"),
+            patch.object(ui.view, "confirm_trash", return_value=True),
+            patch.object(ui.source, "prepare_session_actions") as prepare,
+            patch.object(
+                ui.source,
+                "perform_prepared_action",
+                side_effect=[transcripts.ActionResult(), transcripts.ActionResult()],
+            ),
+            patch.object(ui.store, "record_action"),
+        ):
+            ui.run_batch_action(screen, state)
+
+        prepare.assert_called_once_with(marked, "trash")
+        self.assertEqual([entry.title for entry in state.sessions], ["third"])
+        self.assertFalse(state.marked_sessions)
+        self.assertIn("Trashed 2 sessions", state.status)
+        self.assertNotIn("first", state.status)
+
+    def test_partial_batch_failure_keeps_unprocessed_marks(self):
+        root = Path("/project")
+        entries = [
+            session(name, source="claude", title=name)
+            for name in ("first", "second", "third")
+        ]
+        state = ui.TuiState(
+            entries.copy(),
+            "all",
+            "name",
+            root,
+            browser.BrowserState.create(root),
+            source_filter="claude",
+        )
+        state.marked_sessions.update(entry.storage_key for entry in entries)
+        screen = Screen([])
+
+        with (
+            patch.object(ui.view, "confirm_batch_action", return_value="trash"),
+            patch.object(ui.view, "confirm_trash", return_value=True),
+            patch.object(ui.source, "prepare_session_actions"),
+            patch.object(
+                ui.source,
+                "perform_prepared_action",
+                side_effect=[transcripts.ActionResult(), OSError("disk busy")],
+            ),
+            patch.object(ui.store, "record_action"),
+        ):
+            ui.run_batch_action(screen, state)
+
+        self.assertEqual([entry.title for entry in state.sessions], ["second", "third"])
+        self.assertEqual(
+            {entry.title for entry in ui.marked_sessions(state)}, {"second", "third"}
+        )
+        self.assertIn("Trashed 1/3; stopped: disk busy", state.status)
+
     def test_claude_has_only_recoverable_trash(self):
         self.assertEqual(
             available_actions(session("claude", source="claude")), {"trash"}

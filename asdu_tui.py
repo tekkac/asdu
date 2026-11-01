@@ -304,6 +304,7 @@ class TuiState:
     status: str = ""
     search_results: list[Session] | None = None
     search_return: tuple[int, int] | None = None
+    marked_sessions: set[str] = field(default_factory=set)
     mode_state: dict[tuple[str, Path], tuple[str, int, int]] = field(
         default_factory=dict
     )
@@ -371,6 +372,56 @@ class TuiFrame:
     tree_children: dict[int | None, list[int]]
     total: int
     selected_entry: Session | None
+
+
+def bulk_selection_allowed(state: TuiState) -> bool:
+    """Bulk marks apply only to an all-sessions list containing one source."""
+    eligible_view = (
+        state.mode == "all"
+        and state.browser.detail is None
+        and state.search_results is None
+    )
+    sources = {session.source for session in state.current_view()[1]}
+    return eligible_view and len(sources) == 1
+
+
+def marked_sessions(state: TuiState) -> list[Session]:
+    """Return marked sessions in the current list's display scope."""
+    if not bulk_selection_allowed(state):
+        state.marked_sessions.clear()
+        return []
+    current = [
+        session
+        for session in state.current_view()[1]
+        if session.storage_key in state.marked_sessions
+    ]
+    state.marked_sessions.intersection_update(
+        session.storage_key for session in current
+    )
+    return current
+
+
+def batch_actions(
+    sessions: list[Session], all_sessions: list[Session] | None = None
+) -> set[str]:
+    """Return common actions that are safe for explicit multi-row selection."""
+    if not sessions:
+        return set()
+    actions = set.intersection(
+        *(set(source.available_actions(session)) for session in sessions)
+    )
+    if len(sessions) > 1:
+        actions.discard("export")
+    if all_sessions is None:
+        actions = {
+            action
+            for action in actions
+            if all(
+                source.action_scope(session, action) != "native-tree"
+                for session in sessions
+            )
+        }
+    return actions
 
 
 def refresh_tui_view(state: TuiState, frame: TuiFrame) -> None:
@@ -468,6 +519,8 @@ def render_tui_frame(window: curses.window, state: TuiState) -> TuiFrame:
     """Render one browser frame and return only the data needed by key handling."""
     window.erase()
     height, width = window.getmaxyx()
+    if not bulk_selection_allowed(state):
+        state.marked_sessions.clear()
     visible, grouped_visible, base_items, scoped = state.current_view()
     browser = state.browser
     searching = state.search_results is not None
@@ -623,6 +676,7 @@ def render_tui_frame(window: curses.window, state: TuiState) -> TuiFrame:
                     else "",
                     stats.get(model.row_id(entries[0])),
                     largest_session,
+                    marked=entries[0].storage_key in state.marked_sessions,
                 )
                 continue
             display_name = "/" + name if kind == "folder" else name
@@ -819,7 +873,22 @@ def render_tui_frame(window: curses.window, state: TuiState) -> TuiFrame:
         )
     ):
         commands.append("Backspace back")
-    if selected_entry is not None and source.available_actions(selected_entry):
+    marked = marked_sessions(state)
+    if (
+        bulk_selection_allowed(state)
+        and selected_entry is not None
+        and source.available_actions(selected_entry)
+    ):
+        commands.append("Space mark")
+    if marked:
+        commands.append(
+            "a action"
+            if len(marked) == 1
+            else "a actions"
+            if batch_actions(marked, state.sessions)
+            else "a why"
+        )
+    elif selected_entry is not None and source.available_actions(selected_entry):
         commands.append("a action")
     if (
         has_sessions
@@ -832,11 +901,15 @@ def render_tui_frame(window: curses.window, state: TuiState) -> TuiFrame:
         commands.append("g group")
     commands.extend(["f source", "F type", "s sort"])
     selected_info = (
-        f"{selected_entry.source} {selected_entry.session_id[:18]} | "
-        f"{datetime.fromtimestamp(selected_entry.modified, datetime.now().astimezone().tzinfo).strftime('%Y-%m-%d %H:%M')} | "
-        f"{view.short_path(str(selected_entry.path))}"
-        if selected_entry is not None
-        else ""
+        f"{len(marked)} selected | {marked[0].source} | {view.aggregate_size(marked)}"
+        if marked
+        else (
+            f"{selected_entry.source} {selected_entry.session_id[:18]} | "
+            f"{datetime.fromtimestamp(selected_entry.modified, datetime.now().astimezone().tzinfo).strftime('%Y-%m-%d %H:%M')} | "
+            f"{view.short_path(str(selected_entry.path))}"
+            if selected_entry is not None
+            else ""
+        )
     )
     view.draw_line(
         window,
@@ -926,13 +999,6 @@ def handle_tree_navigation(state: TuiState, frame: TuiFrame, key: int) -> bool:
     if entry is None:
         return False
     identifier = model.row_id(entry)
-    if key == ord(" "):
-        if frame.entry_children.get(identifier):
-            if identifier in state.collapsed_nodes:
-                state.collapsed_nodes.remove(identifier)
-            else:
-                state.collapsed_nodes.add(identifier)
-        return True
     if key not in (
         *UP_KEYS,
         *DOWN_KEYS,
@@ -1013,33 +1079,15 @@ def rescan_sessions(
     refresh_tui_view(state, frame)
 
 
-def run_session_action(
-    window: curses.window, state: TuiState, frame: TuiFrame, entry: Session
+def execute_session_action(
+    state: TuiState,
+    action: str,
+    targets: list[Session],
+    invocations: list[Session],
+    scope: str,
+    entry: Session,
 ) -> None:
-    """Choose and execute one source-supported lifecycle action."""
-    if not source.available_actions(entry):
-        state.status = f"{entry.source.upper()} has no storage actions."
-        return
-    subtree = model.session_subtree(state.sessions, entry)
-    choice = view.confirm_session_action(window, entry, subtree)
-    tree_action = bool(choice and choice.endswith(" tree"))
-    action = choice.removesuffix(" tree") if choice else None
-    scope = source.action_scope(entry, action) if action is not None else "single"
-    targets = subtree if tree_action or scope == "native-tree" else [entry]
-    targets = [
-        target
-        for target in targets
-        if action is not None and action in source.available_actions(target)
-    ]
-    confirmed = (
-        view.confirm_trash(window, len(targets))
-        if action == "trash"
-        else view.confirm_permanent_delete(window, len(targets))
-        if action == "delete"
-        else action is not None
-    )
-    if not confirmed:
-        return
+    """Preflight and execute source-owned mutations, then refresh UI state."""
     try:
         source.prepare_session_actions(targets, action)
     except OSError as error:
@@ -1056,8 +1104,8 @@ def run_session_action(
     failures = []
     log_error = None
     changed = 0
+    changed_sessions = []
     destination = None
-    invocations = [entry] if scope == "native-tree" else targets
     for target in invocations:
         try:
             outcome = source.perform_prepared_action(target, action)
@@ -1065,8 +1113,13 @@ def run_session_action(
             failures.append(str(error))
             break
         destination = outcome.destination or destination
-        affected = targets if scope == "native-tree" else [target]
+        affected = (
+            model.session_subtree(targets, target)
+            if scope == "native-tree"
+            else [target]
+        )
         changed += len(affected)
+        changed_sessions.extend(affected)
         try:
             store.record_action(
                 action,
@@ -1096,15 +1149,17 @@ def run_session_action(
                     entries.pop(position)
                 else:
                     entries[position] = replacement
+    state.marked_sessions.difference_update(
+        session.storage_key for session in changed_sessions
+    )
     state.view_key = None
     if failures:
         state.status = f"{result} {changed}/{len(targets)}; stopped: {failures[0]}"
     else:
-        affected = targets[:changed]
         freed = (
             0
             if action in {"export", "archive", "unarchive"}
-            else sum(target.size for target in affected)
+            else sum(target.size for target in changed_sessions)
         )
         if state.search_results is not None:
             current = state.search_results
@@ -1120,22 +1175,125 @@ def run_session_action(
             "delete": "permanent",
         }[action]
         count = f"{changed} sessions | " if changed > 1 else ""
-        amount = view.session_size(
-            freed, any(target.size_is_logical for target in affected)
+        identity = (
+            f"{entry.source} {entry.session_id[:18]}"
+            if changed == 1
+            else entry.source
         )
-        if any(target.size_is_logical for target in affected):
+        amount = view.session_size(
+            freed, any(target.size_is_logical for target in changed_sessions)
+        )
+        if any(target.size_is_logical for target in changed_sessions):
             amount += " logical"
         state.status = (
             f"Exported to {view.short_path(str(destination))} | {permanence}"
             if action == "export" and destination is not None
             else (
-                f"{result} {count}{amount} | {entry.source} "
-                f"{entry.session_id[:18]} | {view.aggregate_size(current)} now | "
+                f"{result} {count}{amount} | {identity} | "
+                f"{view.aggregate_size(current)} now | "
                 f"{permanence}"
             )
         )
     if log_error is not None:
         state.status += f"; action log unavailable: {log_error}"
+
+
+def run_batch_action(window: curses.window, state: TuiState) -> None:
+    """Apply one shared source action to only the explicitly marked sessions."""
+    targets = marked_sessions(state)
+    if not targets:
+        state.marked_sessions.clear()
+        state.status = "No marked sessions in this list."
+        return
+    if len({target.source for target in targets}) != 1:
+        state.status = "Bulk actions cannot cross sources."
+        return
+    selected = targets
+    actions = batch_actions(selected, state.sessions)
+    if not actions:
+        state.status = "No shared bulk action for these sessions."
+        return
+    native_tree = any(
+        source.action_scope(session, action) == "native-tree"
+        for session in selected
+        for action in actions
+    )
+    invocations = selected
+    targets = selected
+    scope = "single"
+    if native_tree:
+        selected_ids = {model.row_id(session) for session in selected}
+        parents = model.parent_links(state.sessions)
+
+        def has_selected_ancestor(session: Session) -> bool:
+            parent = parents.get(model.row_id(session))
+            while parent is not None:
+                if parent in selected_ids:
+                    return True
+                parent = parents.get(parent)
+            return False
+
+        invocations = [
+            session
+            for session in selected
+            if not has_selected_ancestor(session)
+        ]
+        targets = list(
+            {
+                model.row_id(descendant): descendant
+                for root in invocations
+                for descendant in model.session_subtree(state.sessions, root)
+            }.values()
+        )
+        scope = "native-tree"
+    action = view.confirm_batch_action(
+        window, targets, actions, selected_count=len(selected)
+    )
+    if action is None:
+        return
+    confirmed = (
+        view.confirm_trash(window, len(targets))
+        if action == "trash"
+        else view.confirm_permanent_delete(window, len(targets))
+        if action == "delete"
+        else True
+    )
+    if not confirmed:
+        return
+    execute_session_action(
+        state, action, targets, invocations, scope, invocations[0]
+    )
+
+
+def run_session_action(
+    window: curses.window, state: TuiState, frame: TuiFrame, entry: Session
+) -> None:
+    """Choose and execute one source-supported lifecycle action."""
+    if not source.available_actions(entry):
+        state.status = f"{entry.source.upper()} has no storage actions."
+        return
+    subtree = model.session_subtree(state.sessions, entry)
+    choice = view.confirm_session_action(window, entry, subtree)
+    tree_action = bool(choice and choice.endswith(" tree"))
+    action = choice.removesuffix(" tree") if choice else None
+    scope = source.action_scope(entry, action) if action is not None else "single"
+    targets = subtree if tree_action or scope == "native-tree" else [entry]
+    targets = [
+        target
+        for target in targets
+        if action is not None and action in source.available_actions(target)
+    ]
+    confirmed = (
+        view.confirm_trash(window, len(targets))
+        if action == "trash"
+        else view.confirm_permanent_delete(window, len(targets))
+        if action == "delete"
+        else action is not None
+    )
+    if not confirmed:
+        return
+    invocations = [entry] if scope == "native-tree" else targets
+    execute_session_action(state, action, targets, invocations, scope, entry)
 
 
 def cycle_filter(state: TuiState, frame: TuiFrame, key: int) -> None:
@@ -1313,8 +1471,9 @@ def handle_tui_key(
             "F: cycle session-type filter (all, main, child, review, ?)\n"
             "s: cycle sort\n"
             "g: switch between folder, source, and all-session views\n"
-            "t: toggle session tree (↑↓ siblings, ←→ parent/child, Space fold, z all)\n"
-            "a: source-supported session actions\n"
+            "t: toggle session tree (↑↓ siblings, ←→ fold/parent/child, z all)\n"
+            "Space: mark/unmark the selected session (tree marks this row only)\n"
+            "a: act on marked sessions, or the current session if none are marked\n"
             "Mouse wheel: scrolls with arrow keys when supported by the terminal\n"
             "q: quit",
         )
@@ -1355,8 +1514,30 @@ def handle_tui_key(
         )
         state.tree_mode, state.collapsed_nodes = browser.toggle_tree(contextual_tree)
         browser.selected, browser.offset = 0, 0
+    elif key == ord(" ") and bulk_selection_allowed(state) and selected_entry:
+        if not source.available_actions(selected_entry):
+            state.status = f"{selected_entry.source.upper()} has no storage actions."
+            return True
+        if selected_entry.storage_key in state.marked_sessions:
+            state.marked_sessions.remove(selected_entry.storage_key)
+        else:
+            state.marked_sessions.add(selected_entry.storage_key)
+        marked = marked_sessions(state)
+        state.status = (
+            f"{len(marked)} selected | {marked[0].source} | "
+            f"{view.aggregate_size(marked)}"
+            if marked
+            else "Selection cleared"
+        )
     elif key == ord("a") and selected_entry is not None:
-        run_session_action(window, state, frame, selected_entry)
+        if state.marked_sessions:
+            marked = marked_sessions(state)
+            if len(marked) == 1:
+                run_session_action(window, state, frame, marked[0])
+            else:
+                run_batch_action(window, state)
+        else:
+            run_session_action(window, state, frame, selected_entry)
     elif key in (ord("f"), ord("F")):
         cycle_filter(state, frame, key)
     elif key == ord("s"):

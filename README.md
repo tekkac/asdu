@@ -74,8 +74,13 @@ folded.
 - `f` filters by source.
 - `F` filters by session type: main, child, review, or `?` when unknown.
 - `s` changes the sort order.
-- `t` toggles trees. `Space` folds one branch and `z` folds or opens all.
+- `t` toggles trees. `←→` fold/open and move between parents and children;
+  `z` folds or opens all.
 - `a` shows the actions supported by the selected source.
+- In the all-sessions list, bulk marking is available when the current
+  list contains one source. Use `f` to filter, or start with `--source claude`.
+  Mark rows with `Space`; in tree mode, it marks only the selected session.
+  `a` offers shared actions and shows the combined count and size.
 - `r` rescans.
 - `q` quits.
 

@@ -128,6 +128,46 @@ class TerminalTests(unittest.TestCase):
             self.wait_for(b"asdu")
         os.write(self.master, b"q")
         self.finish(0)
+
+    def test_single_source_all_list_marks_session_with_space(self):
+        self.stop()
+        termios.tcsetattr(self.slave, termios.TCSANOW, self.original_modes)
+        fixtures = ROOT / "tests" / "fixtures" / "asdu"
+        env = dict(os.environ, TERM="xterm-256color", LC_ALL="C.UTF-8")
+        for key in (
+            "XDG_CACHE_HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+        ):
+            env[key] = self.directory.name
+        self.output = b""
+        self.process = subprocess.Popen(
+            [
+                sys.executable,
+                str(ROOT / "asdu.py"),
+                "--no-progress",
+                "--source",
+                "claude",
+                "--claude-root",
+                str(fixtures),
+                "--group",
+                "all",
+                "/",
+            ],
+            stdin=self.slave,
+            stdout=self.slave,
+            stderr=self.slave,
+            env=env,
+        )
+        self.wait_for(b"Enter open")
+        self.read_for(0.1)
+        self.assertIn(b"Space mark", self.output)
+        os.write(self.master, b" ")
+        self.wait_for(b"[x]")
+        os.write(self.master, b"q")
+        self.finish(0)
+
     def test_ctrl_c_restores_terminal(self):
         self.process.send_signal(signal.SIGINT)
         self.finish(130)

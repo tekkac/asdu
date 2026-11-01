@@ -434,6 +434,7 @@ def draw_session_line(
     stats: tuple[int, int] | None = None,
     largest: int = 0,
     folder: str = "",
+    marked: bool = False,
 ) -> None:
     """Render stable columns; only the free-text tail is allowed to truncate."""
     _, width = window.getmaxyx()
@@ -456,8 +457,13 @@ def draw_session_line(
         - display_width(prefix + source + kind + date + folder_text + branch),
     )
     count = f" (+{descendants})" if descendants else ""
+    mark = "[x] " if marked else ""
     title = pad_display(
-        compact_text(session_label(session), max(0, title_width - len(count))) + count,
+        mark
+        + compact_text(
+            session_label(session), max(0, title_width - len(count) - len(mark))
+        )
+        + count,
         title_width,
     )
     line = prefix + source + kind + date + folder_text + branch + title
@@ -671,6 +677,66 @@ def confirm_session_action(
         body,
         [*options, "cancel"],
         options[0] if options else "cancel",
+        shortcuts,
+        labels,
+    )
+
+
+def confirm_batch_action(
+    window: curses.window,
+    sessions: list[Session],
+    actions: set[str],
+    selected_count: int | None = None,
+) -> str | None:
+    """Choose one action shared by an explicit, same-source selection."""
+    ordered = [
+        action
+        for action in ("export", "archive", "unarchive", "trash", "delete")
+        if action in actions
+    ]
+    if not sessions or not ordered:
+        return None
+    count = len(sessions)
+    selected_count = count if selected_count is None else selected_count
+    total = sum(session.size for session in sessions)
+    logical = any(session.size_is_logical for session in sessions)
+    source = source_name(sessions[0].source)
+    body = [
+        f"{selected_count} selected sessions | {source}",
+        *(
+            [f"{count} sessions including descendants"]
+            if count > selected_count
+            else []
+        ),
+        f"Combined size: {session_size(total, logical)}",
+    ]
+    verbs = {
+        "export": ("e", "Export", "write verified copies | keeps sessions"),
+        "archive": ("a", "Archive", "move to native archive | reversible"),
+        "unarchive": ("u", "Unarchive", "restore to active sessions"),
+        "trash": ("t", "Trash", "move to system Trash | recoverable"),
+        "delete": (
+            "d",
+            "Delete",
+            "permanent native delete"
+            + (" | includes descendants" if count > selected_count else ""),
+        ),
+    }
+    labels = {
+        action: f"{verbs[action][0]}  {verbs[action][1]:<9}  {verbs[action][2]}"
+        for action in ordered
+    }
+    labels["cancel"] = "   Cancel"
+    shortcuts = {
+        ord(verbs[action][0]): action
+        for action in ordered
+    }
+    return action_dialog(
+        window,
+        "Batch action" if count > 1 else "Selected action",
+        body,
+        [*ordered, "cancel"],
+        "cancel",
         shortcuts,
         labels,
     )
