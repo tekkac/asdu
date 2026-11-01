@@ -1149,7 +1149,9 @@ def execute_session_action(
                     entries.pop(position)
                 else:
                     entries[position] = replacement
-    state.marked_sessions.clear()
+    state.marked_sessions.difference_update(
+        session.storage_key for session in changed_sessions
+    )
     state.view_key = None
     if failures:
         state.status = f"{result} {changed}/{len(targets)}; stopped: {failures[0]}"
@@ -1173,6 +1175,11 @@ def execute_session_action(
             "delete": "permanent",
         }[action]
         count = f"{changed} sessions | " if changed > 1 else ""
+        identity = (
+            f"{entry.source} {entry.session_id[:18]}"
+            if changed == 1
+            else entry.source
+        )
         amount = view.session_size(
             freed, any(target.size_is_logical for target in changed_sessions)
         )
@@ -1182,8 +1189,8 @@ def execute_session_action(
             f"Exported to {view.short_path(str(destination))} | {permanence}"
             if action == "export" and destination is not None
             else (
-                f"{result} {count}{amount} | {entry.source} "
-                f"{entry.session_id[:18]} | {view.aggregate_size(current)} now | "
+                f"{result} {count}{amount} | {identity} | "
+                f"{view.aggregate_size(current)} now | "
                 f"{permanence}"
             )
         )

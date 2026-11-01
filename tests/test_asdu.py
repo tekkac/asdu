@@ -974,6 +974,43 @@ class ActionTests(unittest.TestCase):
         self.assertEqual([entry.title for entry in state.sessions], ["third"])
         self.assertFalse(state.marked_sessions)
         self.assertIn("Trashed 2 sessions", state.status)
+        self.assertNotIn("first", state.status)
+
+    def test_partial_batch_failure_keeps_unprocessed_marks(self):
+        root = Path("/project")
+        entries = [
+            session(name, source="claude", title=name)
+            for name in ("first", "second", "third")
+        ]
+        state = ui.TuiState(
+            entries.copy(),
+            "all",
+            "name",
+            root,
+            browser.BrowserState.create(root),
+            source_filter="claude",
+        )
+        state.marked_sessions.update(entry.storage_key for entry in entries)
+        screen = Screen([])
+
+        with (
+            patch.object(ui.view, "confirm_batch_action", return_value="trash"),
+            patch.object(ui.view, "confirm_trash", return_value=True),
+            patch.object(ui.source, "prepare_session_actions"),
+            patch.object(
+                ui.source,
+                "perform_prepared_action",
+                side_effect=[transcripts.ActionResult(), OSError("disk busy")],
+            ),
+            patch.object(ui.store, "record_action"),
+        ):
+            ui.run_batch_action(screen, state)
+
+        self.assertEqual([entry.title for entry in state.sessions], ["second", "third"])
+        self.assertEqual(
+            {entry.title for entry in ui.marked_sessions(state)}, {"second", "third"}
+        )
+        self.assertIn("Trashed 1/3; stopped: disk busy", state.status)
 
     def test_claude_has_only_recoverable_trash(self):
         self.assertEqual(
