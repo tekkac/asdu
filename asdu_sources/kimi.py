@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
+import queue
 import re
 import subprocess
+import threading
+import time
 import zipfile
 from pathlib import Path
 
@@ -24,18 +28,17 @@ from asdu_sessions import (
 )
 
 SESSION_ID = re.compile(r"^session_[A-Za-z0-9][A-Za-z0-9_-]*$")
+ACP_TIMEOUT = 20
 
 
 def available_actions(session: Session) -> frozenset[str]:
-    return (
-        frozenset({"export"})
-        if session.origin == "primary" and SESSION_ID.fullmatch(session.session_id)
-        else frozenset()
-    )
+    if session.origin == "primary" and SESSION_ID.fullmatch(session.session_id):
+        return frozenset({"export", "delete"})
+    return frozenset()
 
 
-def action_scope(_session: Session, _action: str) -> str:
-    return "single"
+def action_scope(_session: Session, action: str) -> str:
+    return "native-tree" if action == "delete" else "single"
 
 
 def export_destination(session: Session) -> Path:
@@ -43,6 +46,10 @@ def export_destination(session: Session) -> Path:
 
 
 def prepare_actions(sessions: list[Session], action: str) -> None:
+    if action == "delete":
+        for session in sessions:
+            validate_session_bundle(session)
+        return
     if action != "export":
         return
     if len(sessions) != 1 or action not in available_actions(sessions[0]):
@@ -52,6 +59,12 @@ def prepare_actions(sessions: list[Session], action: str) -> None:
 
 
 def perform_action(session: Session, action: str) -> ActionResult:
+    if action == "delete":
+        if action not in available_actions(session):
+            raise OSError("Kimi can only delete primary sessions")
+        validate_session_bundle(session)
+        delete_via_acp(session.session_id, session.source_home)
+        return ActionResult()
     if action != "export" or action not in available_actions(session):
         raise OSError(f"Kimi cannot {action} this session")
     destination = export_destination(session)
@@ -87,6 +100,163 @@ def perform_action(session: Session, action: str) -> ActionResult:
     if not destination.is_file() or not zipfile.is_zipfile(destination):
         raise OSError("Kimi reported success but did not create a valid ZIP")
     return ActionResult(destination=destination, replacement=session)
+
+
+def validate_session_bundle(session: Session) -> None:
+    """Check that a displayed Kimi agent still belongs to its stored session."""
+    if session.source != "kimi" or session.origin not in {"primary", "subagent"}:
+        raise OSError("invalid Kimi session; rescan before acting")
+    session_id, separator, agent_id = session.session_id.partition(":")
+    if not SESSION_ID.fullmatch(session_id):
+        raise OSError("invalid Kimi session ID; rescan before acting")
+    agent_id = agent_id if separator else "main"
+    if not isinstance(agent_id, str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9_-]*", agent_id
+    ):
+        raise OSError("invalid Kimi agent ID; rescan before acting")
+    bundle = session.path.parents[2]
+    expected_path = bundle / "agents" / agent_id / "wire.jsonl"
+    if session.path != expected_path or not expected_path.is_file():
+        raise OSError("Kimi session path changed; rescan before acting")
+    if bundle.parents[2] != Path(session.source_home):
+        raise OSError("Kimi session is outside its configured data root")
+    try:
+        state = json.loads((bundle / "state.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise OSError("could not verify Kimi session bundle") from error
+    if not isinstance(state, dict) or state.get("id") != session_id:
+        raise OSError("Kimi session changed since scan; rescan before acting")
+    agents = state.get("agents")
+    if agent_id != "main" and (
+        not isinstance(agents, dict) or agent_id not in agents
+    ):
+        raise OSError("Kimi agent is no longer in this session")
+
+
+def delete_via_acp(session_id: str, source_home: str) -> None:
+    """Delete one Kimi session through its native ACP session/delete method."""
+    if not SESSION_ID.fullmatch(session_id):
+        raise OSError("invalid Kimi session ID; rescan before acting")
+    environment = os.environ.copy()
+    environment["KIMI_CODE_HOME"] = str(Path(source_home).expanduser().absolute())
+    try:
+        process = subprocess.Popen(
+            ["kimi", "acp"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            env=environment,
+        )
+    except OSError as error:
+        raise OSError(f"Could not start Kimi ACP: {error}") from error
+    if process.stdin is None or process.stdout is None:
+        process.kill()
+        process.wait()
+        raise OSError("Kimi ACP did not open its protocol streams")
+
+    messages: queue.Queue[str | None | BaseException] = queue.Queue()
+
+    def read_messages() -> None:
+        try:
+            for line in process.stdout:
+                messages.put(line)
+        except OSError as error:
+            messages.put(error)
+        finally:
+            messages.put(None)
+
+    threading.Thread(target=read_messages, daemon=True).start()
+
+    def request(request_id: int, method: str, params: dict) -> dict:
+        payload = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": method,
+            "params": params,
+        }
+        try:
+            process.stdin.write(json.dumps(payload, separators=(",", ":")) + "\n")
+            process.stdin.flush()
+        except OSError as error:
+            raise OSError("Kimi ACP closed its input stream") from error
+        deadline = time.monotonic() + ACP_TIMEOUT
+        while True:
+            try:
+                line = messages.get(timeout=max(0, deadline - time.monotonic()))
+            except queue.Empty as error:
+                raise OSError(f"Kimi ACP {method} timed out") from error
+            if isinstance(line, BaseException):
+                raise OSError("could not read Kimi ACP response") from line
+            if line is None:
+                raise OSError("Kimi ACP closed before replying")
+            try:
+                response = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(response, dict) or response.get("id") != request_id:
+                continue
+            if "error" in response:
+                error = response["error"]
+                detail = (
+                    error.get("message", "request failed")
+                    if isinstance(error, dict)
+                    else "request failed"
+                )
+                raise OSError(f"Kimi ACP {method} failed: {detail}")
+            result = response.get("result")
+            if not isinstance(result, dict):
+                raise OSError(f"Kimi ACP {method} returned an invalid response")
+            return result
+
+    try:
+        initialized = request(
+            1,
+            "initialize",
+            {
+                "protocolVersion": 1,
+                "clientCapabilities": {},
+                "clientInfo": {"name": "asdu", "version": "0.8.3"},
+            },
+        )
+        agent_capabilities = initialized.get("agentCapabilities")
+        session_capabilities = (
+            agent_capabilities.get("sessionCapabilities")
+            if isinstance(agent_capabilities, dict)
+            else None
+        )
+        if (
+            not isinstance(session_capabilities, dict)
+            or not (
+                isinstance(session_capabilities.get("delete"), dict)
+                or session_capabilities.get("delete") is True
+            )
+        ):
+            raise OSError("this Kimi version does not support session deletion")
+        request(2, "session/delete", {"sessionId": session_id})
+    finally:
+        try:
+            process.stdin.close()
+        except (OSError, ValueError):
+            pass
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            try:
+                process.terminate()
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                process.wait()
 
 
 def session_controls(session: Session) -> SessionControls:

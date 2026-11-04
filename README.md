@@ -77,8 +77,8 @@ folded.
 - `t` toggles trees. `←→` fold/open and move between parents and children;
   `z` folds or opens all.
 - `a` shows the actions supported by the selected source.
-- In the all-sessions list, bulk marking is available when the current
-  list contains one source. Use `f` to filter, or start with `--source claude`.
+- In folder and all-sessions views, bulk marking is available when the current
+  session list contains one source. Use `f` to filter, or start with `--source claude`.
   Mark rows with `Space`; in tree mode, it marks only the selected session.
   `a` offers shared actions and shows the combined count and size.
 - `r` rescans.
@@ -126,10 +126,12 @@ Active Claude sessions are refused.
 
 OpenCode and Hermes store sessions together in SQLite. Their `~` sizes rank
 logical session content; deleting one may not immediately shrink the database
-file. Kimi can export a verified session ZIP to the current directory; it does
-not provide a CLI storage action. Antigravity, Gemini CLI, Hermes, and OMP have
-no storage actions. Antigravity sizes include each conversation database and its
-matching `brain/` artifacts once. Native child agents appear as trees.
+file. Kimi can export a verified ZIP or permanently delete a session through its
+native ACP interface. Antigravity delete removes the conversation database,
+summary entry, and matching `brain/` artifacts; active or changed sessions are
+refused. Tree actions include descendants. Antigravity sizes include each
+conversation database and its matching `brain/` artifacts once. Gemini CLI,
+Hermes, and OMP have no storage actions.
 
 Successful actions append a content-free record to
 `$XDG_STATE_HOME/asdu/actions.jsonl`, normally

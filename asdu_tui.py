@@ -374,15 +374,21 @@ class TuiFrame:
     selected_entry: Session | None
 
 
+def bulk_candidates(state: TuiState) -> list[Session]:
+    """Return sessions belonging to the current selectable list."""
+    if state.browser.detail is not None or state.search_results is not None:
+        return []
+    _, grouped, items, scoped = state.current_view()
+    if state.mode == "all":
+        return grouped
+    if state.mode == "cwd":
+        direct = [entries[0] for kind, _, entries in items if kind == "session"]
+        return model.tree_with_ancestors(direct, scoped) if state.tree_mode else direct
+    return []
+
+
 def bulk_selection_allowed(state: TuiState) -> bool:
-    """Bulk marks apply only to an all-sessions list containing one source."""
-    eligible_view = (
-        state.mode == "all"
-        and state.browser.detail is None
-        and state.search_results is None
-    )
-    sources = {session.source for session in state.current_view()[1]}
-    return eligible_view and len(sources) == 1
+    return len({session.source for session in bulk_candidates(state)}) == 1
 
 
 def marked_sessions(state: TuiState) -> list[Session]:
@@ -392,7 +398,7 @@ def marked_sessions(state: TuiState) -> list[Session]:
         return []
     current = [
         session
-        for session in state.current_view()[1]
+        for session in bulk_candidates(state)
         if session.storage_key in state.marked_sessions
     ]
     state.marked_sessions.intersection_update(
@@ -1362,6 +1368,7 @@ def open_selected(window: curses.window, state: TuiState, frame: TuiFrame) -> No
         open_brief(window, entries[0], frame.grouped_visible)
         return
     if state.mode == "cwd" and kind == "folder" and name != "(unknown folder)":
+        state.marked_sessions.clear()
         browser.visit_folder(
             browser.cwd_node / name, model.item_key(frame.items[browser.selected])
         )
@@ -1405,6 +1412,7 @@ def go_back(state: TuiState, frame: TuiFrame) -> None:
     elif browser.detail is not None:
         browser.leave_detail()
     elif state.mode == "cwd" and not store.is_filesystem_root(browser.cwd_node):
+        state.marked_sessions.clear()
         browser.visit_folder(
             browser.cwd_node.parent,
             model.item_key(frame.items[browser.selected]) if frame.items else None,
@@ -1486,6 +1494,7 @@ def handle_tui_key(
     if handle_list_navigation(state, frame, key):
         return True
     if not searching and browser.detail is None and key == ord("g"):
+        state.marked_sessions.clear()
         state.mode_state[(state.mode, browser.cwd_node)] = (
             state.sort_by,
             browser.selected,
