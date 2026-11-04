@@ -128,6 +128,9 @@ def create_store(root: Path) -> None:
                 ),
             ),
         )
+        database.execute(
+            "ALTER TABLE conversation_summaries ADD COLUMN not_fully_idle INTEGER DEFAULT 0"
+        )
         database.commit()
 
 
@@ -181,7 +184,7 @@ class AntigravityTests(unittest.TestCase):
         self.assertIn("Latest fictional request", preview)
         self.assertIn("Latest fictional reply", preview)
         self.assertIn("Recorded via: planner", digest)
-        self.assertEqual(available_actions(parent), frozenset())
+        self.assertEqual(available_actions(parent), frozenset({"delete"}))
         self.assertEqual(
             session_controls(parent).commands[0].argv,
             ("agy", "--conversation", PARENT_ID),
@@ -201,6 +204,33 @@ class AntigravityTests(unittest.TestCase):
 
             self.assertEqual(antigravity.discover(root, progress), [])
             self.assertIn(malformed, progress.invalid)
+
+    def test_batch_delete_removes_only_selected_conversations(self):
+        from asdu_sources import perform_prepared_action, prepare_session_actions
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            create_store(root)
+            entries = antigravity.discover(root, ui.ScanProgress(False))
+            prepare_session_actions(entries, "delete")
+            for entry in entries:
+                perform_prepared_action(entry, "delete")
+            self.assertFalse((root / "conversations" / f"{PARENT_ID}.db").exists())
+            self.assertFalse((root / "conversations" / f"{CHILD_ID}.db").exists())
+            self.assertFalse((root / "brain" / PARENT_ID).exists())
+            with closing(sqlite3.connect(root / "conversation_summaries.db")) as db:
+                self.assertEqual(db.execute("SELECT count(*) FROM conversation_summaries").fetchone()[0], 0)
+
+    def test_active_conversation_blocks_batch_before_deleting_anything(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            create_store(root)
+            with closing(sqlite3.connect(root / "conversation_summaries.db")) as db, db:
+                db.execute("UPDATE conversation_summaries SET not_fully_idle = 1 WHERE conversation_id = ?", (CHILD_ID,))
+            entries = antigravity.discover(root, ui.ScanProgress(False))
+            with self.assertRaisesRegex(OSError, "active"):
+                antigravity.prepare_actions(entries, "delete")
+            self.assertTrue((root / "conversations" / f"{PARENT_ID}.db").exists())
 
     def test_workspace_uri_decoding_is_portable(self):
         encoded = json.dumps(["file:///workspace/a%20project"])

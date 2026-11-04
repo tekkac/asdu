@@ -53,8 +53,10 @@ _Avoid_: Plugin, provider
 A reviewed operation supported by the source that owns a session. Storage
 actions change lifecycle or remove data; export actions create a verified copy
 and retain the session. Codex provides archive, restore, and delete. Claude
-session files can move to the system Trash. Kimi provides export. OpenCode
-provides native deletion of a session and its descendants.
+session files can move to the system Trash. Kimi provides export and native
+session deletion. Antigravity supports deletion of idle conversations and their
+stored artifacts. OpenCode provides native deletion of a session and its
+descendants.
 
 **Action scope**:
 The sessions changed by one source-native action. Some actions affect only the

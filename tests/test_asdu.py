@@ -776,7 +776,7 @@ class ActionTests(unittest.TestCase):
         self.assertIn("3 sessions including descendants", text)
         self.assertIn("includes descendants", text)
 
-    def test_bulk_selection_requires_single_source_all_sessions_list(self):
+    def test_bulk_selection_requires_single_source_in_current_list(self):
         root = Path("/project")
         entries = [session("one", source="claude")]
         state = ui.TuiState(
@@ -799,7 +799,16 @@ class ActionTests(unittest.TestCase):
         self.assertTrue(ui.bulk_selection_allowed(state))
         state.tree_mode = False
         state.mode = "cwd"
+        self.assertTrue(ui.bulk_selection_allowed(state))
+        state.source_filter = "all"
         self.assertFalse(ui.bulk_selection_allowed(state))
+        state.sessions[-1] = replace(state.sessions[-1], cwd="/project/subfolder")
+        state.view_key = None
+        self.assertTrue(ui.bulk_selection_allowed(state))
+        state.marked_sessions.add(entries[0].storage_key)
+        self.assertEqual(ui.marked_sessions(state), [entries[0]])
+        state.browser.cwd_node = root / "subfolder"
+        self.assertEqual(ui.marked_sessions(state), [])
 
     def test_opencode_batch_delete_includes_descendants(self):
         parent = session("parent", source="opencode")
@@ -812,6 +821,30 @@ class ActionTests(unittest.TestCase):
         self.assertEqual(
             ui.batch_actions([parent, leaf], [parent, child, leaf]), {"delete"}
         )
+
+    def test_folder_view_marks_sessions_and_clears_marks_on_navigation(self):
+        root = Path("/project")
+        first = session("first", source="claude")
+        second = session("second", source="claude")
+        nested = session("nested", source="claude", cwd="/project/subfolder")
+        state = ui.TuiState(
+            [first, second, nested], "cwd", "name", root,
+            browser.BrowserState.create(root), source_filter="claude",
+        )
+        screen = Screen([])
+        frame = ui.render_tui_frame(screen, state)
+        ui.handle_tui_key(screen, state, frame, ord(" "), lambda _: [])
+        self.assertFalse(state.marked_sessions)
+        for index in (1, 2):
+            state.browser.selected = index
+            frame = ui.render_tui_frame(screen, state)
+            ui.handle_tui_key(screen, state, frame, ord(" "), lambda _: [])
+        self.assertEqual(state.marked_sessions, {first.storage_key, second.storage_key})
+        state.browser.selected = 0
+        frame = ui.render_tui_frame(screen, state)
+        ui.handle_tui_key(screen, state, frame, 10, lambda _: [])
+        self.assertEqual(state.browser.cwd_node, root / "subfolder")
+        self.assertFalse(state.marked_sessions)
 
     def test_action_on_one_marked_opencode_session_uses_native_dialog(self):
         root = Path("/project")

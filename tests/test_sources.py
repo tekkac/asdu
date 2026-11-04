@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from test_asdu import FIXTURES, browser, session
@@ -503,9 +505,30 @@ class SourceTests(unittest.TestCase):
         with self.assertRaisesRegex(OSError, "does not support delete"):
             perform_session_action(session("omp", source="omp"), "delete")
 
-    def test_kimi_has_no_delete_action(self):
-        with self.assertRaisesRegex(OSError, "does not support delete"):
-            perform_session_action(session("kimi", source="kimi"), "delete")
+    def test_kimi_delete_uses_native_session_and_data_root(self):
+        entries = kimi.discover(FIXTURES / "kimi-code" / "sessions", ui.ScanProgress(False))
+        main = next(entry for entry in entries if entry.origin == "primary")
+        with patch.object(kimi, "delete_via_acp") as delete:
+            perform_session_action(main, "delete")
+        delete.assert_called_once_with(main.session_id, main.source_home)
+
+    def test_kimi_acp_delete_accepts_capability_object(self):
+        class Input(io.StringIO):
+            def close(self):
+                pass
+
+        requests = Input()
+        responses = io.StringIO(
+            json.dumps({"id": 1, "result": {"agentCapabilities": {
+                "sessionCapabilities": {"delete": {}}
+            }}}) + "\n" + json.dumps({"id": 2, "result": {}}) + "\n"
+        )
+        process = SimpleNamespace(stdin=requests, stdout=responses, wait=lambda **_: 0)
+        with patch.object(kimi.subprocess, "Popen", return_value=process):
+            kimi.delete_via_acp("session_test-001", "/fictional/kimi")
+        sent = [json.loads(line) for line in requests.getvalue().splitlines()]
+        self.assertEqual(sent[1]["method"], "session/delete")
+        self.assertEqual(sent[1]["params"], {"sessionId": "session_test-001"})
 
 
 if __name__ == "__main__":

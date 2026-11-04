@@ -1,19 +1,21 @@
-"""Read-only discovery for Google Antigravity conversation stores."""
+"""Antigravity conversation discovery and guarded storage actions."""
 
 from __future__ import annotations
 
 import json
 import os
 import re
+import shutil
 import sqlite3
 from collections import Counter
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from asdu_sessions import (
+    ActionResult,
     BriefData,
     ScanReporter,
     Session,
@@ -40,6 +42,7 @@ SUMMARY_COLUMNS = {
     "agent_name",
 }
 CONVERSATION_TABLES = {"steps", "trajectory_meta"}
+DELETE_COLUMNS = {"conversation_id", "last_modified_time", "not_fully_idle"}
 USER_REQUEST = re.compile(r"<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>", re.DOTALL)
 
 
@@ -256,6 +259,159 @@ def discover(root: Path, progress: ScanReporter) -> list[Session]:
     if not paths:
         progress.update("Antigravity", 0, 0, 0, 0)
     return sessions
+
+
+def available_actions(session: Session) -> frozenset[str]:
+    if session.source == "agy" and CONVERSATION_ID.fullmatch(session.session_id):
+        return frozenset({"delete"})
+    return frozenset()
+
+
+def action_scope(_session: Session, action: str) -> str:
+    return "selectable-tree" if action == "delete" else "single"
+
+
+def delete_layout(session: Session) -> tuple[Path, Path, Path]:
+    """Return the exact summary, conversation, and brain paths for one ID."""
+    root = Path(session.source_home)
+    if not CONVERSATION_ID.fullmatch(session.session_id):
+        raise OSError("invalid Antigravity conversation ID; rescan before acting")
+    conversation = root / "conversations" / f"{session.session_id}.db"
+    brain = root / "brain" / session.session_id
+    if session.path != conversation:
+        raise OSError("Antigravity conversation path changed; rescan before acting")
+    if (
+        (root / "conversations").is_symlink()
+        or (root / "brain").is_symlink()
+        or conversation.is_symlink()
+        or brain.is_symlink()
+    ):
+        raise OSError("refusing to delete a symlinked Antigravity conversation")
+    return root / "conversation_summaries.db", conversation, brain
+
+
+def read_delete_rows(sessions: list[Session]) -> dict[str, sqlite3.Row]:
+    if not sessions:
+        return {}
+    roots = {session.source_home for session in sessions}
+    if len(roots) != 1:
+        raise OSError("Antigravity delete cannot cross storage roots")
+    root = Path(next(iter(roots)))
+    summary_path = root / "conversation_summaries.db"
+    if not summary_path.is_file() or summary_path.is_symlink():
+        raise OSError("Antigravity summary database is unavailable")
+    try:
+        database = sqlite3.connect(
+            summary_path.absolute().as_uri() + "?mode=ro", uri=True, timeout=1
+        )
+        database.row_factory = sqlite3.Row
+        missing = DELETE_COLUMNS - columns(database, "conversation_summaries")
+        if missing:
+            raise OSError(
+                "Antigravity database cannot verify idle sessions; update "
+                "Antigravity before deleting"
+            )
+        ids = tuple(dict.fromkeys(session.session_id for session in sessions))
+        rows = {}
+        for start in range(0, len(ids), 500):
+            chunk = ids[start : start + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            rows.update(
+                (row["conversation_id"], row)
+                for row in database.execute(
+                    "SELECT conversation_id, last_modified_time, not_fully_idle "
+                    "FROM conversation_summaries "
+                    f"WHERE conversation_id IN ({placeholders})",
+                    chunk,
+                )
+            )
+    except sqlite3.Error as error:
+        raise OSError(f"could not verify Antigravity conversations: {error}") from error
+    finally:
+        if "database" in locals():
+            database.close()
+    return rows
+
+
+def prepare_actions(sessions: list[Session], action: str) -> None:
+    if action != "delete":
+        raise OSError(f"Antigravity cannot {action} conversations")
+    if any(session.source != "agy" for session in sessions):
+        raise OSError("Antigravity delete cannot cross sources")
+    rows = read_delete_rows(sessions)
+    for session in sessions:
+        _, conversation, _ = delete_layout(session)
+        if session.source != "agy" or not conversation.is_file():
+            raise OSError("Antigravity conversation is no longer present")
+        row = rows.get(session.session_id)
+        if row is None:
+            raise OSError("Antigravity conversation is no longer indexed")
+        try:
+            active = int(row["not_fully_idle"] or 0)
+        except (TypeError, ValueError) as error:
+            raise OSError("Antigravity activity state is unreadable") from error
+        if active:
+            raise OSError("Antigravity session is active; close it before deleting")
+        size, file_modified = owned_stats(Path(session.source_home), conversation)
+        summary_modified = parse_time(row["last_modified_time"])
+        if size != session.size or max(file_modified, summary_modified) != session.modified:
+            raise OSError("Antigravity session changed since scan; rescan before acting")
+        try:
+            require_conversation_schema(conversation)
+        except (OSError, sqlite3.Error) as error:
+            raise OSError("Antigravity conversation database is unreadable") from error
+
+
+def perform_action(session: Session, action: str) -> ActionResult:
+    if action != "delete" or action not in available_actions(session):
+        raise OSError(f"Antigravity cannot {action} this conversation")
+    prepare_actions([session], action)
+    summary_path, conversation, brain = delete_layout(session)
+    try:
+        with closing(sqlite3.connect(summary_path, timeout=5)) as database, database:
+            database.execute("BEGIN IMMEDIATE")
+            row = database.execute(
+                "SELECT not_fully_idle, last_modified_time "
+                "FROM conversation_summaries "
+                "WHERE conversation_id = ?",
+                (session.session_id,),
+            ).fetchone()
+            if row is None:
+                raise OSError("Antigravity conversation is no longer indexed")
+            try:
+                active = int(row[0] or 0)
+            except (TypeError, ValueError) as error:
+                raise OSError("Antigravity activity state is unreadable") from error
+            if active:
+                raise OSError("Antigravity session is active; close it before deleting")
+            size, file_modified = owned_stats(Path(session.source_home), conversation)
+            if (
+                size != session.size
+                or max(file_modified, parse_time(row[1])) != session.modified
+            ):
+                raise OSError("Antigravity session changed since scan; rescan before acting")
+            database.execute(
+                "DELETE FROM conversation_summaries WHERE conversation_id = ?",
+                (session.session_id,),
+            )
+    except sqlite3.Error as error:
+        raise OSError(f"could not remove Antigravity summary: {error}") from error
+
+    try:
+        if brain.is_dir():
+            shutil.rmtree(brain)
+        for sidecar in (
+            conversation.with_name(conversation.name + "-wal"),
+            conversation.with_name(conversation.name + "-shm"),
+        ):
+            sidecar.unlink(missing_ok=True)
+        conversation.unlink(missing_ok=True)
+    except OSError as error:
+        raise OSError(
+            "Antigravity summary was removed, but some conversation files remain; "
+            "rescan and retry"
+        ) from error
+    return ActionResult()
 
 
 def load_brief(session: Session, poll=None, preview: bool = False) -> BriefData:
