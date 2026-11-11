@@ -10,9 +10,10 @@ from asdu_sessions import (
     ScanReporter,
     Session,
     SessionControls,
+    absolute_path,
 )
 
-from . import antigravity, claude, codex, gemini, hermes, kimi, omp, opencode
+from . import antigravity, claude, codex, gemini, hermes, kimi, omp, opencode, pi
 
 READERS = {
     "codex": codex,
@@ -21,6 +22,7 @@ READERS = {
     "gemini": gemini,
     "kimi": kimi,
     "omp": omp,
+    "pi": pi,
     "opencode": opencode,
     "agy": antigravity,
 }
@@ -57,10 +59,20 @@ def scan(
     progress: ScanReporter,
 ) -> list[Session]:
     sessions: list[Session] = []
+    pi_omp_paths: set[Path] = set()
     for source in sources:
         adapter = adapters[source]
         if adapter.root.exists():
-            sessions.extend(adapter.scan(adapter.root, progress))
+            found = adapter.scan(adapter.root, progress)
+            if source in {"pi", "omp"}:
+                unique = []
+                for session in found:
+                    path = absolute_path(session.path)
+                    if path not in pi_omp_paths:
+                        unique.append(session)
+                        pi_omp_paths.add(path)
+                found = unique
+            sessions.extend(found)
     return sessions
 
 

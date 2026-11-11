@@ -906,6 +906,30 @@ class ActionTests(unittest.TestCase):
         self.assertFalse(state.sessions)
         self.assertIn("Deleted 2 sessions", state.status)
 
+    def test_pi_batch_trash_warns_and_stops_on_partial_failure(self):
+        root = Path("/project")
+        entries = [session("first", source="pi"), session("second", source="pi")]
+        state = ui.TuiState(
+            entries.copy(), "all", "name", root,
+            browser.BrowserState.create(root), source_filter="pi",
+        )
+        state.marked_sessions.update(entry.storage_key for entry in entries)
+        screen = Screen([])
+        with (
+            patch.object(ui.view, "confirm_batch_action", return_value="trash"),
+            patch.object(ui.view, "confirm_pi_trash", return_value=True) as confirm,
+            patch.object(ui.source, "prepare_session_actions"),
+            patch.object(ui.source, "perform_prepared_action", side_effect=[
+                transcripts.ActionResult(), OSError("Trash unavailable")
+            ]),
+            patch.object(ui.store, "record_action"),
+        ):
+            ui.run_batch_action(screen, state)
+        confirm.assert_called_once_with(screen, 2)
+        self.assertEqual(state.sessions, [entries[1]])
+        self.assertEqual(state.marked_sessions, {entries[1].storage_key})
+        self.assertIn("Trashed 1/2", state.status)
+
     def test_marked_opencode_parent_batch_deletes_tree_once(self):
         root = Path("/project")
         parent = session("parent", source="opencode", title="parent")
@@ -1477,6 +1501,7 @@ class CliAndReaderTests(unittest.TestCase):
                 "codex",
                 "claude",
                 "omp",
+                "pi",
                 "kimi",
                 "opencode",
                 "agy",

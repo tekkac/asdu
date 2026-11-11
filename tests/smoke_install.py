@@ -26,6 +26,7 @@ from asdu_sources import (
     kimi,
     omp,
     opencode,
+    pi,
 )
 
 
@@ -61,6 +62,7 @@ class InstalledSmoke(unittest.TestCase):
                 (codex, "rollout-codex.jsonl"),
                 (claude, "claude-test.jsonl"),
                 (omp, "omp-test.jsonl"),
+                (pi, "pi-test.jsonl"),
             )
             entries = []
             roots = {}
@@ -243,6 +245,7 @@ class InstalledSmoke(unittest.TestCase):
                     "hermes",
                     "kimi",
                     "omp",
+                    "pi",
                     "opencode",
                     "agy",
                 },
@@ -257,6 +260,8 @@ class InstalledSmoke(unittest.TestCase):
                 str(roots[claude]),
                 "--omp-root",
                 str(roots[omp]),
+                "--pi-root",
+                str(roots[pi]),
                 "--kimi-root",
                 str(roots[kimi]),
                 "--opencode-db",

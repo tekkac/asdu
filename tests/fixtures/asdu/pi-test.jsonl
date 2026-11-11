@@ -1,0 +1,3 @@
+{"type":"session","version":3,"id":"pi-test-001","timestamp":"2026-01-01T00:00:00Z","cwd":"/workspace/demo"}
+{"type":"message","id":"one","parentId":null,"message":{"role":"user","content":"Inspect the Pi fixture"}}
+{"type":"message","id":"two","parentId":"one","message":{"role":"assistant","content":[{"type":"text","text":"fixture inspected"}]}}

@@ -1258,7 +1258,9 @@ def run_batch_action(window: curses.window, state: TuiState) -> None:
     if action is None:
         return
     confirmed = (
-        view.confirm_trash(window, len(targets))
+        (view.confirm_pi_trash if targets[0].source == "pi" else view.confirm_trash)(
+            window, len(targets)
+        )
         if action == "trash"
         else view.confirm_permanent_delete(window, len(targets))
         if action == "delete"
@@ -1290,7 +1292,9 @@ def run_session_action(
         if action is not None and action in source.available_actions(target)
     ]
     confirmed = (
-        view.confirm_trash(window, len(targets))
+        (view.confirm_pi_trash if entry.source == "pi" else view.confirm_trash)(
+            window, len(targets)
+        )
         if action == "trash"
         else view.confirm_permanent_delete(window, len(targets))
         if action == "delete"

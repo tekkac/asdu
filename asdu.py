@@ -51,6 +51,13 @@ def default_opencode_db() -> Path:
     return data_home.expanduser() / "opencode" / "opencode.db"
 
 
+def default_pi_root() -> Path:
+    configured = os.environ.get("PI_CODING_AGENT_SESSION_DIR")
+    if configured:
+        return Path(configured).expanduser()
+    return default_root("PI_CODING_AGENT_DIR", ".pi/agent", "sessions")
+
+
 def default_hermes_db() -> Path:
     if configured := os.environ.get("HERMES_HOME"):
         return Path(configured).expanduser() / "state.db"
@@ -113,6 +120,10 @@ def parser() -> argparse.ArgumentParser:
         help="OMP session storage directory (read-only)",
     )
     result.add_argument(
+        "--pi-root", type=Path, default=default_pi_root(),
+        help="Pi session storage directory",
+    )
+    result.add_argument(
         "--kimi-root",
         type=Path,
         default=default_root("KIMI_CODE_HOME", ".kimi-code", "sessions"),
@@ -150,6 +161,7 @@ def parser() -> argparse.ArgumentParser:
             "hermes",
             "kimi",
             "omp",
+            "pi",
             "opencode",
             "agy",
             "gemini",
@@ -218,6 +230,7 @@ def run_main() -> int:
             "codex": args.codex_root,
             "claude": args.claude_root,
             "omp": args.omp_root,
+            "pi": args.pi_root,
             "kimi": args.kimi_root,
             "opencode": args.opencode_db,
             "agy": args.antigravity_root,
