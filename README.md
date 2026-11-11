@@ -14,6 +14,9 @@
 `asdu` shows where Antigravity (`agy`), Claude, Codex, Gemini CLI, Hermes, Kimi,
 OpenCode, OMP, and Pi sessions use disk space.
 
+If Pi and OMP roots overlap, a transcript appears once under the first scanned
+source. Use `--source pi` or `--source omp` to choose which source interprets it.
+
 It works like a file browser. Start in a folder, inspect its sessions, and move
 up or down the directory tree. Everything stays local.
 

@@ -1,6 +1,7 @@
 """Pi JSONL sessions and recoverable transcript removal."""
 
 import json
+import stat
 from dataclasses import replace
 from pathlib import Path
 
@@ -82,12 +83,13 @@ def discover(root: Path, progress) -> list[Session]:
         )
 
     sessions = scan_paths("Pi", root.rglob("*.jsonl"), inspect, progress)
-    by_path = {str(entry.path.absolute()): entry.session_id for entry in sessions}
+    by_path = {str(absolute_path(entry.path)): entry.session_id for entry in sessions}
     return [
         replace(
             entry,
             forked_from=by_path.get(
-                str(Path(entry.forked_from).expanduser().absolute()), entry.forked_from
+                str(absolute_path(Path(entry.forked_from).expanduser())),
+                entry.forked_from,
             ),
         )
         if entry.forked_from
@@ -113,8 +115,12 @@ def prepare_actions(sessions: list[Session], action: str) -> None:
         current = root
         for component in relative.parts:
             current = current / component
-            if current.is_symlink():
-                raise OSError("refusing to trash a symlinked Pi session")
+            info = current.lstat()
+            if stat.S_ISLNK(info.st_mode) or (
+                getattr(info, "st_file_attributes", 0)
+                & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+            ):
+                raise OSError("refusing to trash a linked Pi session")
         require_unchanged(session)
         try:
             with path.open(encoding="utf-8") as stream:

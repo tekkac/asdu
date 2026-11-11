@@ -1,10 +1,12 @@
 """Pi session discovery and recoverable actions using fictional transcripts."""
 
 import json
+import stat
 import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import asdu
@@ -104,6 +106,31 @@ class PiTests(unittest.TestCase):
             entries = scan(("omp", "pi"), adapters, ui.ScanProgress(False))
             self.assertEqual(len(entries), 1)
             self.assertEqual(entries[0].source, "omp")
+
+    def test_fork_path_is_normalized_before_linking(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parent = root / "parent.jsonl"
+            write_session(parent, "parent")
+            write_session(
+                root / "child.jsonl", "child", root / "sub" / ".." / parent.name
+            )
+            entries = pi.discover(root, ui.ScanProgress(False))
+            child = next(entry for entry in entries if entry.session_id == "child")
+            self.assertEqual(child.forked_from, "parent")
+
+    def test_trash_refuses_windows_reparse_points(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "one.jsonl"
+            write_session(path, "one")
+            entry = pi.discover(root, ui.ScanProgress(False))[0]
+            junction = SimpleNamespace(st_mode=stat.S_IFDIR, st_file_attributes=0x400)
+            with (
+                patch.object(Path, "lstat", return_value=junction),
+                self.assertRaisesRegex(OSError, "linked"),
+            ):
+                pi.prepare_actions([entry], "trash")
 
     def test_trash_refuses_wrong_root_and_reports_trash_failure(self):
         with tempfile.TemporaryDirectory() as directory:
