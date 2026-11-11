@@ -393,6 +393,7 @@ def source_color(source: str) -> int:
         "claude": 8,
         "hermes": 5,
         "omp": 10,
+        "pi": 10,
         "kimi": 11,
         "opencode": 4,
         "agy": 12,
@@ -763,6 +764,12 @@ def confirm_action(window, title: str, question: str, count: int) -> bool:
 def confirm_trash(window: curses.window, count: int = 1) -> bool:
     return confirm_action(
         window, "Confirm Trash", "Move {target} to system Trash?", count
+    )
+
+
+def confirm_pi_trash(window: curses.window, count: int = 1) -> bool:
+    return confirm_action(
+        window, "Confirm Trash", "Close Pi sessions first. Move {target} to Trash?", count
     )
 
 

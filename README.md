@@ -12,7 +12,10 @@
 ```
 
 `asdu` shows where Antigravity (`agy`), Claude, Codex, Gemini CLI, Hermes, Kimi,
-OpenCode, and OMP sessions use disk space.
+OpenCode, OMP, and Pi sessions use disk space.
+
+If Pi and OMP roots overlap, a transcript appears once under the first scanned
+source. Use `--source pi` or `--source omp` to choose which source interprets it.
 
 It works like a file browser. Start in a folder, inspect its sessions, and move
 up or down the directory tree. Everything stays local.
@@ -120,8 +123,9 @@ Resume: claude --resume demo-css-001
 Browsing never changes a session. Press `a` to review an action before it runs.
 
 Codex archive and restore use Codex itself. Codex delete is permanent. Claude
-sessions can move to the system Trash. OpenCode delete is permanent and includes
-the selected session's descendants. Tree actions include folded descendants.
+and Pi transcripts can move to the system Trash. Close Pi sessions before
+trashing them; asdu cannot reliably identify every active Pi session. OpenCode
+delete is permanent and includes the selected session's descendants. Tree actions include folded descendants.
 Active Claude sessions are refused.
 
 OpenCode and Hermes store sessions together in SQLite. Their `~` sizes rank
